@@ -59,7 +59,6 @@ Image-Generator-Gguf/
 ├── scripts/                       # All scripts have 6-10 letter names
 │   ├── configure.py                # Configuration, and all global variables/constants/maps/lists are here.
 │   ├── display.py                  # Gradio, Browser, Python Displays.
-│   ├── modella.py                 # Model loader & manager
 │   ├── inference.py                  # Image generation, Model Handling, Text Generation.
 │   ├── utilities.py                  # General code, and code that is not more appropriate to be in other scripts.
 ├── models/                        # Default model directory
