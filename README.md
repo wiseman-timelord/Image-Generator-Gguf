@@ -17,6 +17,7 @@ I put Q# because it should support any quantization, the model variety will be e
 - intended Image generation model "z_image_turbo-Q#.gguf" and "ae.safetensors". (again this should cover all quantizations)
 
 ### Structure:
+- Kimi was told...
 ```
 .\Image-Generator-Gguf.bat  (name of program)
 .\launcher.py
@@ -27,9 +28,47 @@ I put Q# because it should support any quantization, the model variety will be e
 .\output\   (folder with output images)
 .\models\   (default folder for models, though it should handle it if they are not there. The user is expected to set where the models are in the configuration page when the program loads).
 ```
+...Kimi's plan was...
+```
+Image-Generator-Gguf/
+├── Image-Generator-Gguf.bat      # Windows launcher batch file
+├── launcher.py                    # Main Gradio 5 application
+├── installer.py                   # Setup & build script
+├── data/
+│   ├── constants.ini              # System constants & defaults
+│   └── persistent.json            # User configuration (auto-managed)
+├── scripts/                       # All scripts have 6-10 letter names
+│   ├── configio.py                # Config file I/O handler
+│   ├── vulkck.py                  # Vulkan capability checker
+│   ├── modella.py                 # Model loader & manager
+│   ├── imggen.py                  # Image generation engine
+│   ├── buildr.py                  # Build system for llama.cpp + sd.cpp
+│   └── dbginfo.py                 # Debug info collector
+├── models/                        # Default model directory
+└── output/                        # Generated images directory
+```
+...I insisted upon new structure, scripts folder will have only, configure.py, inference.py, displays.py, utilities.py, 4 scripts. The program will become...
+```
+Image-Generator-Gguf/
+├── Image-Generator-Gguf.bat      # Windows launcher batch file
+├── launcher.py                    # Startup, Shutdown, Main Loop.
+├── installer.py                   # Download, Setup & Build, Install, creation/rectiation of json, creation/recreation of constants.ini.
+├── data/
+│   ├── constants.ini              # System constants & defaults
+│   └── persistent.json            # User configuration (auto-managed)
+├── scripts/                       # All scripts have 6-10 letter names
+│   ├── configure.py                # Configuration, and all global variables/constants/maps/lists are here.
+│   ├── display.py                  # Gradio, Browser, Python Displays.
+│   ├── modella.py                 # Model loader & manager
+│   ├── inference.py                  # Image generation, Model Handling, Text Generation.
+│   ├── utilities.py                  # General code, and code that is not more appropriate to be in other scripts.
+├── models/                        # Default model directory
+└── output/                        # Generated images directory
+```
 
 ### Development:
 A small program in python with gradio 5...
 - Page 1 the Interaction page- it will have a text box with a generate button underneath, to the side of that will be configurations for image generation, with dropdown list for reasonable values and sensible default settings and sensible ranges in the lists.
 - Page 2 the Configuration page - Where the user configures, model location used for, 1. encoding and 2. image generation, these would require display of current path and a browse button, Additionally page 2 would have whatever configurations are required for these models, individually, with dropdown list for reasonable values and sensible default settings and sensible ranges in the lists.
+
 - Page 3 the Debug/Info page - showing useful values, that actually change, not constants, ensure its all in a text box too, with a little copy button so I could paste it back during development.
