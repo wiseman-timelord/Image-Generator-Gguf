@@ -3,20 +3,15 @@
 installer.py - Standalone setup script for Image Generator GGUF.
 
 Detects hardware (CPU cores/threads, Vulkan GPUs), creates a venv,
-installs Python dependencies into it, then builds llama.cpp and
-stable-diffusion.cpp with optimal flags for Zen 2 + Vulkan.
+installs Python dependencies, then installs llama-cpp-python and
+stable-diffusion-cpp-python via pip wheels (pre-built where available,
+compiled from source with CPU/Vulkan flags where not).
 
 Writes:
     ./data/constants.ini   - hardware constants, thread counts, GPU info
     ./data/persistent.json - default user config (only if absent)
 
 No imports from scripts.* — this is self-contained.
-
-Usage (called by batch menu, option 2):
-    python installer.py
-    python installer.py --deps-only
-    python installer.py --build-only
-    python installer.py --detect-only
 """
 
 from __future__ import annotations
@@ -29,9 +24,11 @@ import math
 import os
 import platform
 import shutil
+import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,9 +41,6 @@ from typing import Any, Dict, List, Optional, Tuple
 _ROOT = Path(__file__).resolve().parent
 _DATA_DIR    = _ROOT / "data"
 _VENV_DIR    = _ROOT / "venv"
-_BUILD_DIR   = _DATA_DIR / "build"
-_LLAMA_DIR   = _BUILD_DIR / "llama.cpp"
-_SD_DIR      = _BUILD_DIR / "sd.cpp"
 _CONST_PATH  = _DATA_DIR / "constants.ini"
 _PERSIST_PATH = _DATA_DIR / "persistent.json"
 _MODELS_DIR  = _ROOT / "models"
@@ -57,6 +51,26 @@ REQUIREMENTS = [
     "Pillow>=10.0",
     "numpy>=1.26",
 ]
+
+# ---------------------------------------------------------------------------
+# Backend wheel constants
+# ---------------------------------------------------------------------------
+
+# llama-cpp-python: pre-built Vulkan wheel index (abetlen)
+LLAMA_CPP_VULKAN_INDEX  = "https://abetlen.github.io/llama-cpp-python/whl/vulkan"
+# llama-cpp-python: pre-built CPU wheel (eswarthammana, pinned stable version)
+LLAMA_CPP_CPU_VERSION   = "0.3.16"
+LLAMA_CPP_CPU_WHEEL_BASE = (
+    "https://github.com/eswarthammana/llama-cpp-wheels/releases/download/"
+    "v{ver}/llama_cpp_python-{ver}-{pytag}-{pytag}-win_amd64.whl"
+)
+# stable-diffusion-cpp-python: source build only (no Vulkan binary wheel exists)
+SD_CPP_PACKAGE          = "stable-diffusion-cpp-python"
+# Retry settings for pip builds
+BUILD_MAX_RETRIES       = 3
+BUILD_RETRY_DELAY       = 10
+# Inactivity timeout for long pip builds (seconds)
+BUILD_INACTIVITY_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -83,15 +97,33 @@ def section(title: str) -> None:
     print("  " + "-" * len(title))
 
 
+def _safe_rmtree(path: Path) -> bool:
+    """Remove a directory tree on Windows, clearing read-only flags first.
+    Git pack files and index files are often marked read-only, which causes
+    a plain shutil.rmtree to raise PermissionError on Windows.
+    Returns True if the directory is gone afterwards.
+    """
+    def _on_error(func, fpath, exc_info):
+        # Clear read-only bit and retry
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            pass
+
+    if not path.exists():
+        return True
+    shutil.rmtree(path, onerror=_on_error)
+    return not path.exists()
+
+
 # ---------------------------------------------------------------------------
 # Directory setup
 # ---------------------------------------------------------------------------
 
 def ensure_dirs() -> None:
-    for d in (_DATA_DIR, _BUILD_DIR, _MODELS_DIR, _OUTPUT_DIR,
-              _ROOT / "scripts"):
+    for d in (_DATA_DIR, _MODELS_DIR, _OUTPUT_DIR, _ROOT / "scripts"):
         d.mkdir(parents=True, exist_ok=True)
-    # Ensure scripts/__init__.py exists
     init = _ROOT / "scripts" / "__init__.py"
     if not init.exists():
         init.write_text("# scripts package\n", encoding="utf-8")
@@ -499,27 +531,20 @@ def install_deps() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Build tools detection
+# Build tools detection (used only for banner display and cmake wheel check)
 # ---------------------------------------------------------------------------
+
 def _find_cmake_in_vs_installations() -> Optional[Path]:
-    """Search for cmake.exe inside Visual Studio / Build Tools installations.
-    Returns Path to the directory containing cmake.exe, or None.
-    """
+    """Return the cmake.exe bin directory from a VS / Build Tools install, or None."""
     prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     prog_files     = os.environ.get("ProgramFiles",       r"C:\Program Files")
     install_roots: List[str] = []
 
-    # 1. Use vswhere to get all installation paths
     vswhere_exe = Path(prog_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if vswhere_exe.exists():
         try:
             result = subprocess.run(
-                [
-                    str(vswhere_exe),
-                    "-all",               # all installed products
-                    "-prerelease",        # include pre-release
-                    "-property", "installationPath",
-                ],
+                [str(vswhere_exe), "-all", "-prerelease", "-property", "installationPath"],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0:
@@ -527,7 +552,6 @@ def _find_cmake_in_vs_installations() -> Optional[Path]:
         except Exception:
             pass
 
-    # 2. Hard-coded default roots for VS 2019 & 2022, all editions
     for base in (prog_files_x86, prog_files):
         for year in ("2022", "2019"):
             for edition in ("BuildTools", "Enterprise", "Professional", "Community", "Preview"):
@@ -535,261 +559,235 @@ def _find_cmake_in_vs_installations() -> Optional[Path]:
                 if os.path.isdir(candidate) and candidate not in install_roots:
                     install_roots.append(candidate)
 
-    # 3. Walk each root looking for cmake.exe
     for root in install_roots:
         cmake_bin = os.path.join(root, "Common7", "IDE", "CommonExtensions",
                                  "Microsoft", "CMake", "CMake", "bin")
         cmake_exe = os.path.join(cmake_bin, "cmake.exe")
         if os.path.isfile(cmake_exe):
             return Path(cmake_bin)
-
     return None
 
+
 def find_cmake() -> Optional[Path]:
-    # First check PATH
     c = shutil.which("cmake")
     if c:
         return Path(c)
-    # Then search inside VS installations
     cmake_bin_dir = _find_cmake_in_vs_installations()
     if cmake_bin_dir:
-        # Also add to PATH for subsequent subprocesses
         os.environ["PATH"] = str(cmake_bin_dir) + os.pathsep + os.environ.get("PATH", "")
         return cmake_bin_dir / "cmake.exe"
-    # Fallback to hardcoded paths
     for p in (r"C:\Program Files\CMake\bin\cmake.exe",
               r"C:\Program Files (x86)\CMake\bin\cmake.exe"):
         if Path(p).exists():
             return Path(p)
     return None
 
+
 def find_git() -> Optional[Path]:
     g = shutil.which("git")
     return Path(g) if g else None
 
-def _clean_build_dir(build_path: Path) -> None:
-    """Remove CMake cache and files to force a fresh configuration."""
-    cache = build_path / "CMakeCache.txt"
-    if cache.exists():
-        cache.unlink()
-    cmake_files = build_path / "CMakeFiles"
-    if cmake_files.exists():
-        shutil.rmtree(cmake_files, ignore_errors=True)
 
-def _detect_generator() -> str:
-    """Return a usable CMake generator string.
-    Prefers Ninja if it works, otherwise tries Visual Studio generators,
-    finally falls back to no explicit generator (CMake default).
+# ---------------------------------------------------------------------------
+# pip install with live output + inactivity watchdog
+# (adapted from reference installer; used for long C++ source builds)
+# ---------------------------------------------------------------------------
+
+def _pip_install_watched(pip_exe: Path, args: List[str],
+                         max_retries: int = BUILD_MAX_RETRIES,
+                         initial_delay: float = BUILD_RETRY_DELAY) -> bool:
+    """Run pip install <args> with streaming output and an inactivity watchdog.
+    Retries up to max_retries times with exponential backoff.
+    Returns True on success.
     """
-    # Test Ninja
-    if shutil.which("ninja"):
+    _PROGRESS_KW = ("downloading", "installing", "collected", "building",
+                    "running", "error", "warning", "failed", "%", "->")
+    _SUPPRESS_KW = ("pip's dependency resolver",)
+
+    delay = float(initial_delay)
+    cmd   = [str(pip_exe), "install"] + args
+
+    for attempt in range(1, max_retries + 1):
+        all_output: List[str] = []
+        last_activity         = [time.time()]
+        reader_done           = [False]
+        stall_reason: List[Optional[str]] = [None]
+
         try:
-            subprocess.run(["ninja", "--version"], capture_output=True, check=True, timeout=5)
-            return "Ninja"
-        except Exception:
-            pass
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
 
-    # Check for Visual Studio 2022
-    for vs_path in [
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Professional",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
-        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools",
-    ]:
-        if Path(vs_path).exists():
-            return "Visual Studio 17 2022"
+            def _read():
+                try:
+                    for raw in proc.stdout:
+                        line = raw.rstrip()
+                        if not line:
+                            continue
+                        if any(kw in line.lower() for kw in _SUPPRESS_KW):
+                            continue
+                        last_activity[0] = time.time()
+                        all_output.append(line)
+                        if any(kw in line.lower() for kw in _PROGRESS_KW):
+                            log(f"  {line}")
+                finally:
+                    reader_done[0] = True
 
-    # Check for Visual Studio 2019
-    for vs_path in [
-        r"C:\Program Files\Microsoft Visual Studio\2019\Community",
-        r"C:\Program Files\Microsoft Visual Studio\2019\Professional",
-        r"C:\Program Files\Microsoft Visual Studio\2019\Enterprise",
-        r"C:\Program Files\Microsoft Visual Studio\2019\BuildTools",
-    ]:
-        if Path(vs_path).exists():
-            return "Visual Studio 16 2019"
+            t = threading.Thread(target=_read, daemon=True)
+            t.start()
 
-    # No generator specified – let CMake pick default
-    return ""
+            while not reader_done[0]:
+                time.sleep(2)
+                idle = time.time() - last_activity[0]
+                if idle >= BUILD_INACTIVITY_TIMEOUT:
+                    stall_reason[0] = f"No output for {idle:.0f}s — stalled"
+                    proc.kill()
+                    break
 
+            t.join(timeout=5)
+            proc.wait()
 
-def _git_clone_or_update(git: Path, url: str, target: Path,
-                         recursive: bool = False) -> bool:
-    def _do_clone() -> bool:
-        cmd = [str(git), "clone", "--depth", "1"]
-        if recursive:
-            cmd.extend(["--recurse-submodules", "--shallow-submodules"])
-        cmd.extend([url, str(target)])
-        log(f"  Cloning {url} ...")
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            if r.returncode != 0:
-                log(f"  Clone failed: {r.stderr[-400:]}")
-                return False
-            if not (target / "CMakeLists.txt").exists():
-                log(f"  Clone appeared to succeed but CMakeLists.txt is missing.")
-                return False
-            return True
+            combined = "\n".join(all_output).lower()
+            if proc.returncode == 0 or "already satisfied" in combined:
+                return True
+
+            reason = stall_reason[0]
+            if not reason:
+                errs = [l for l in all_output if "error" in l.lower()]
+                reason = errs[-1][:120] if errs else f"exit code {proc.returncode}"
+
+            if attempt < max_retries:
+                log(f"  Attempt {attempt}/{max_retries} failed: {reason}")
+                log(f"  Retrying in {delay:.0f}s ...")
+                time.sleep(delay)
+                delay = min(delay * 2, 300)
+
         except Exception as e:
-            log(f"  Clone failed: {e}")
-            return False
+            if attempt < max_retries:
+                log(f"  Unexpected error: {e}  — retrying in {delay:.0f}s ...")
+                time.sleep(delay)
+                delay = min(delay * 2, 300)
 
-    # Detect a broken existing directory: present but missing CMakeLists.txt
-    if target.exists() and not (target / "CMakeLists.txt").exists():
-        log(f"  {target.name} directory incomplete — wiping and re-cloning ...")
-        shutil.rmtree(target, ignore_errors=False)
-        # Confirm it's gone; on Windows a file lock can prevent removal
-        if target.exists():
-            log(f"  ERROR: could not remove {target} — close any programs using it and retry.")
-            return False
-
-    if not target.exists():
-        return _do_clone()
-
-    # Directory exists and CMakeLists.txt is present — update in place
-    log(f"  Updating {target.name} ...")
-    subprocess.run([str(git), "pull", "--ff-only"], cwd=str(target),
-                   check=False, capture_output=True, text=True, timeout=120)
-    if recursive:
-        subprocess.run(
-            [str(git), "submodule", "update", "--init", "--recursive"],
-            cwd=str(target), check=False, capture_output=True,
-            text=True, timeout=300,
-        )
-    return True
+    return False
 
 
 # ---------------------------------------------------------------------------
-# Build llama.cpp
+# Backend installation — pip wheels
 # ---------------------------------------------------------------------------
 
-def build_llamacpp(cpu: Dict[str, Any], has_vk: bool) -> str:
-    git, cmake = find_git(), find_cmake()
-    if not git:
-        return "error: git not found"
-    if not cmake:
-        return "error: cmake not found"
-
-    # llama.cpp requires submodules (cpp-httplib, pocs, tools, etc.)
-    if not _git_clone_or_update(
-            git,
-            "https://github.com/ggerganov/llama.cpp.git",
-            _LLAMA_DIR,
-            recursive=True):
-        return "error: clone/update failed"
-
-    bdir = _LLAMA_DIR / "build"
-    bdir.mkdir(exist_ok=True)
-    _clean_build_dir(bdir)
-
-    gen = _detect_generator()
-    cmake_args = [
-        str(cmake), "-B", str(bdir), "-S", str(_LLAMA_DIR),
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DGGML_NATIVE=OFF",
-        "-DLLAMA_BUILD_TESTS=OFF",
-        "-DLLAMA_BUILD_EXAMPLES=ON",
-        "-DLLAMA_BUILD_SERVER=OFF",
-    ]
-    if gen:
-        cmake_args.extend(["-G", gen])
-    if gen and "Visual Studio" in gen:
-        cmake_args.extend(["-A", "x64"])
-
-    # CPU optimisation flags
-    for flag in cpu["cmake_flags"]:
-        cmake_args.append(f"-D{flag}")
-
-    cmake_args.append(f"-DGGML_VULKAN={'ON' if has_vk else 'OFF'}")
-
-    log("  Configuring llama.cpp ...")
-    r = subprocess.run(cmake_args, capture_output=True, text=True,
-                       timeout=300)
-    if r.returncode != 0:
-        log(f"  cmake configure failed:\n{r.stderr[-800:]}")
-        return "error: cmake configure"
-
-    log("  Compiling llama.cpp (this takes several minutes) ...")
-    ncpu = min(os.cpu_count() or 4, 16)
-    build_cmd = [str(cmake), "--build", str(bdir), "--config", "Release"]
-    if gen and "Ninja" in gen:
-        build_cmd += ["--parallel", str(ncpu)]
-    elif gen and "Visual Studio" in gen:
-        build_cmd += ["--", f"/m:{ncpu}"]
-    r = subprocess.run(build_cmd, capture_output=True, text=True, timeout=1800)
-    if r.returncode != 0:
-        log(f"  build failed:\n{r.stderr[-600:]}")
-        return "error: build failed"
-    return "success"
+def _py_tag() -> str:
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
 
 
-# ---------------------------------------------------------------------------
-# Build stable-diffusion.cpp
-# ---------------------------------------------------------------------------
+def install_llama_cpp_python(cpu: Dict[str, Any], use_vulkan: bool) -> str:
+    """Install llama-cpp-python.
 
-def build_sdcpp(cpu: Dict[str, Any], has_vk: bool) -> str:
-    git, cmake = find_git(), find_cmake()
-    if not git:
-        return "error: git not found"
-    if not cmake:
-        return "error: cmake not found"
+    use_vulkan=True  → pre-built Vulkan wheel from abetlen index
+    use_vulkan=False → pre-built CPU wheel (eswarthammana v0.3.16);
+                       falls back to source compile with CPU flags only
+                       if the pre-built wheel is unavailable for this Python version.
 
-    # sd.cpp requires submodules (ggml, etc.)
-    if not _git_clone_or_update(
-            git,
-            "https://github.com/leejet/stable-diffusion.cpp.git",
-            _SD_DIR,
-            recursive=True):
-        return "error: clone/update failed"
+    Returns "success (...)" or an error string.
+    """
+    pip = _venv_pip()
+    if not pip.exists():
+        return "error: venv pip not found"
 
-    bdir = _SD_DIR / "build"
-    bdir.mkdir(exist_ok=True)
-    _clean_build_dir(bdir)
+    if use_vulkan:
+        log("  llama-cpp-python: installing Vulkan pre-built wheel ...")
+        ok = _pip_install_watched(pip, [
+            "llama-cpp-python",
+            "--prefer-binary",
+            "--extra-index-url", LLAMA_CPP_VULKAN_INDEX,
+            "--force-reinstall",
+            "--no-cache-dir",
+        ])
+        if ok:
+            return "success (Vulkan wheel)"
+        return "error: Vulkan wheel install failed"
 
-    gen = _detect_generator()
+    # CPU path — try pre-built wheel first
+    ver    = LLAMA_CPP_CPU_VERSION
+    pytag  = _py_tag()
+    whl_url = LLAMA_CPP_CPU_WHEEL_BASE.format(ver=ver, pytag=pytag)
+    log(f"  llama-cpp-python: installing CPU pre-built wheel v{ver} ...")
+    ok = _pip_install_watched(pip, [
+        whl_url,
+        "--force-reinstall",
+        "--no-cache-dir",
+    ])
+    if ok:
+        return "success (CPU wheel)"
 
-    def _make_cmake_args(use_vk: bool) -> List[str]:
-        args = [
-            str(cmake), "-B", str(bdir), "-S", str(_SD_DIR),
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DGGML_NATIVE=OFF",
-            "-DSD_BUILD_SHARED_LIBS=OFF",
-        ]
-        if gen:
-            args.extend(["-G", gen])
-        if gen and "Visual Studio" in gen:
-            args.extend(["-A", "x64"])
-        # CPU optimisation flags
-        for flag in cpu["cmake_flags"]:
-            args.append(f"-D{flag}")
-        if use_vk:
-            args.append("-DSD_VULKAN=ON")
-        return args
+    # Pre-built wheel unavailable for this Python version — compile from source
+    log("  Pre-built wheel unavailable — compiling from source with CPU flags ...")
+    cmake_args_str = " ".join(f"-D{f}" for f in cpu["cmake_flags"])
+    env_patch: Dict[str, str] = {"FORCE_CMAKE": "1"}
+    if cmake_args_str:
+        env_patch["CMAKE_ARGS"] = cmake_args_str
+    old_env = os.environ.copy()
+    os.environ.update(env_patch)
+    try:
+        ok = _pip_install_watched(pip, [
+            "llama-cpp-python",
+            "--no-binary", "llama-cpp-python",
+            "--no-cache-dir",
+            "--force-reinstall",
+        ])
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+    return "success (compiled CPU)" if ok else "error: all strategies failed"
 
-    log("  Configuring sd.cpp ...")
-    cmake_args = _make_cmake_args(has_vk)
-    r = subprocess.run(cmake_args, capture_output=True, text=True, timeout=300)
-    if r.returncode != 0 and has_vk:
-        log("  Vulkan configure failed, retrying CPU-only ...")
-        _clean_build_dir(bdir)
-        cmake_args = _make_cmake_args(False)
-        r = subprocess.run(cmake_args, capture_output=True, text=True, timeout=300)
-    if r.returncode != 0:
-        log(f"  cmake configure failed:\n{r.stderr[-800:]}")
-        return "error: cmake configure"
 
-    log("  Compiling sd.cpp (this takes several minutes) ...")
-    ncpu = min(os.cpu_count() or 4, 16)
-    build_cmd = [str(cmake), "--build", str(bdir), "--config", "Release"]
-    if gen and "Ninja" in gen:
-        build_cmd += ["--parallel", str(ncpu)]
-    elif gen and "Visual Studio" in gen:
-        build_cmd += ["--", f"/m:{ncpu}"]
-    r = subprocess.run(build_cmd, capture_output=True, text=True, timeout=1800)
-    if r.returncode != 0:
-        log(f"  build failed:\n{r.stderr[-600:]}")
-        return "error: build failed"
-    return "success"
+def install_sd_cpp_python(cpu: Dict[str, Any], use_vulkan: bool) -> str:
+    """Install stable-diffusion-cpp-python from source.
+
+    No pre-built binary wheel exists on PyPI — this package always builds
+    from source. CMAKE_ARGS controls Vulkan and CPU optimisation flags.
+
+    use_vulkan=True  → SD_VULKAN=ON + CPU flags
+    use_vulkan=False → CPU flags only
+
+    Returns "success (...)" or an error string.
+    """
+    pip = _venv_pip()
+    if not pip.exists():
+        return "error: venv pip not found"
+
+    # Pre-install cmake binary wheel so the build backend can find cmake
+    log("  Pre-installing cmake wheel for build toolchain ...")
+    _pip_install_watched(pip, ["cmake", "--only-binary=cmake", "--upgrade",
+                               "--no-cache-dir"])
+
+    # Build CMAKE_ARGS from cpu flags + optional Vulkan flag
+    flags: List[str] = list(cpu["cmake_flags"])
+    if use_vulkan:
+        flags.append("SD_VULKAN=ON")
+    cmake_args_str = " ".join(f"-D{f}" for f in flags)
+
+    env_patch: Dict[str, str] = {"FORCE_CMAKE": "1"}
+    if cmake_args_str:
+        env_patch["CMAKE_ARGS"] = cmake_args_str
+        log(f"  CMAKE_ARGS: {cmake_args_str}")
+
+    mode = "Vulkan" if use_vulkan else "CPU"
+    log(f"  stable-diffusion-cpp-python: compiling from source ({mode}) ...")
+
+    old_env = os.environ.copy()
+    os.environ.update(env_patch)
+    try:
+        ok = _pip_install_watched(pip, [
+            SD_CPP_PACKAGE,
+            "--no-binary", "stable-diffusion-cpp-python",
+            "--no-cache-dir",
+            "--force-reinstall",
+        ], max_retries=BUILD_MAX_RETRIES, initial_delay=BUILD_RETRY_DELAY)
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
+    return f"success (compiled {mode})" if ok else f"error: compile failed ({mode})"
 
 
 # ---------------------------------------------------------------------------
@@ -797,12 +795,15 @@ def build_sdcpp(cpu: Dict[str, Any], has_vk: bool) -> str:
 # ---------------------------------------------------------------------------
 
 def _detect_build_tools() -> Tuple[Optional[Path], Optional[Path]]:
+    """Return (git, cmake) for banner display. cmake needed for source builds."""
     return find_git(), find_cmake()
 
 
 def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     git, cmake = _detect_build_tools()
     header("Image-Generator-Gguf — Install Method")
+    print()
+    print()
     print("  System Detections...")
     print(f"     Platform: Windows {platform.version().split('.')[0] if platform.system() == 'Windows' else platform.system()};"
           f" Python {platform.python_version()}")
@@ -820,11 +821,14 @@ def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     print()
     print("  " + "-" * 79)
     print()
+    print()
+    print()
     print("     1. Clean Install (Purge First)")
     print()
     print("     2. Check/Install (Fix Missing Packages/Libraries)")
     print()
     print("     3. Refresh Configs (Only Remake Ini/Json)")
+    print()
     print()
     print()
     print("  " + "=" * 79)
@@ -833,14 +837,16 @@ def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
 def _purge_for_clean_install() -> None:
     """Remove venv and build dirs so everything is rebuilt from scratch."""
     section("Purging previous installation...")
-    for target, label in ((_VENV_DIR, "venv"), (_BUILD_DIR, "build")):
+    for target, label in ((_VENV_DIR, "venv"),):
         if target.exists():
             log(f"Removing {label} at {target} ...")
-            shutil.rmtree(target, ignore_errors=True)
-            log(f"{label} removed.")
+            if _safe_rmtree(target):
+                log(f"{label} removed.")
+            else:
+                log(f"WARNING: could not fully remove {label} at {target}.")
+                log(f"  Close any programs using it (antivirus, explorer) and retry.")
         else:
             log(f"{label} not present, skipping.")
-    # Also remove persistent.json so defaults are regenerated
     if _PERSIST_PATH.exists():
         _PERSIST_PATH.unlink()
         log("persistent.json removed (will be regenerated).")
@@ -860,24 +866,64 @@ def _run_deps(cpu: Dict[str, Any]) -> None:
         log("All packages installed OK.")
 
 
-def _run_build(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
-    """Build llama.cpp and sd.cpp."""
-    section("Backend build  (llama.cpp + stable-diffusion.cpp)...")
-    git  = find_git()
-    cmake = find_cmake()
-    log(f"git   : {git or 'NOT FOUND'}")
-    log(f"cmake : {cmake or 'NOT FOUND'}")
+def _print_backend_banner(vk: Dict[str, Any]) -> None:
+    vk_label = "detected" if vk["available"] else "not detected"
+    header("Image-Generator-Gguf — Backend Selection")
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print(f"     1. Compile for CPU")
+    print()
+    print(f"     2. Compile for Vulkan  ({vk_label})")
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print()
+    print("  " + "=" * 79)
+
+
+def _choose_backend(vk: Dict[str, Any]) -> bool:
+    """Show backend menu, return True for Vulkan, False for CPU."""
+    while True:
+        _print_backend_banner(vk)
+        choice = input("  Selection; Menu Options = 1-2, Abandon Install = A: ").strip().upper()
+        if choice == "A":
+            print()
+            print("  Abandoning install — returning to batch menu.")
+            print()
+            raise SystemExit(0)
+        if choice == "1":
+            return False
+        if choice == "2":
+            return True
+        print()
+        print("  Invalid selection, please try again.")
+        print()
+
+
+def _run_build(cpu: Dict[str, Any], use_vulkan: bool) -> None:
+    """Install llama-cpp-python and stable-diffusion-cpp-python via pip."""
+    mode = "Vulkan" if use_vulkan else "CPU"
+    section(f"Backend install  ({mode})  —  llama-cpp-python + stable-diffusion-cpp-python...")
+
+    log("llama-cpp-python ...")
+    llama_status = install_llama_cpp_python(cpu, use_vulkan)
+    log(f"  llama-cpp-python  →  {llama_status}")
+
     log()
-
-    if not git or not cmake:
-        log("SKIPPING BUILD — git and/or cmake not found.")
-        log("Install them then re-run and choose option 1 or 2.")
-        return
-
-    llama_status = build_llamacpp(cpu, vk["available"])
-    log(f"  llama.cpp  →  {llama_status}")
-    sd_status = build_sdcpp(cpu, vk["available"])
-    log(f"  sd.cpp     →  {sd_status}")
+    log("stable-diffusion-cpp-python ...")
+    sd_status = install_sd_cpp_python(cpu, use_vulkan)
+    log(f"  stable-diffusion-cpp-python  →  {sd_status}")
 
 
 def _run_summary(t0: float) -> None:
@@ -949,7 +995,8 @@ def main() -> None:
         cpu, vk = run_detection()
         write_constants(cpu, vk)
         t0 = time.time()
-        _run_build(cpu, vk)
+        use_vulkan = _choose_backend(vk)
+        _run_build(cpu, use_vulkan)
         _run_summary(t0)
         return
 
@@ -968,27 +1015,30 @@ def main() -> None:
 
         if choice == "1":
             t0 = time.time()
+            use_vulkan = _choose_backend(vk)
+            header("Image-Generator-Gguf — Installation")
             _purge_for_clean_install()
             write_constants(cpu, vk)
             write_default_persistent(cpu)
             _run_deps(cpu)
-            _run_build(cpu, vk)
+            _run_build(cpu, use_vulkan)
             _run_summary(t0)
             return
 
         if choice == "2":
             t0 = time.time()
+            use_vulkan = _choose_backend(vk)
+            header("Image-Generator-Gguf — Installation")
             write_constants(cpu, vk)
             write_default_persistent(cpu)
             _run_deps(cpu)
-            _run_build(cpu, vk)
+            _run_build(cpu, use_vulkan)
             _run_summary(t0)
             return
 
         if choice == "3":
             t0 = time.time()
             section("Refreshing configs...")
-            # Always overwrite constants; persistent only if absent
             write_constants(cpu, vk)
             if _PERSIST_PATH.exists():
                 _PERSIST_PATH.unlink()

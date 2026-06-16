@@ -79,9 +79,11 @@ echo.
 echo.
 echo.
 echo.
+echo.
 echo       1. Run Main Program
 echo.
 echo       2. Run Installation
+echo.
 echo.
 echo.
 echo.
