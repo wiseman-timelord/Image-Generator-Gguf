@@ -1,11 +1,12 @@
 """
-utilities.py - General utility code: hardware detection, build system,
+utilities.py - General utility code: hardware detection, build/package status,
 system information helpers. Code not more appropriate in other scripts.
 """
 
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import os
 import platform
 import shutil
@@ -263,12 +264,55 @@ def get_memory_info() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Build system
+# Build / package status
+# ---------------------------------------------------------------------------
+# The installer installs llama-cpp-python and stable-diffusion-cpp-python as
+# pip wheels into the venv.  There are no standalone C++ executables to find.
+# get_build_status() therefore checks importability of the Python packages,
+# which is the correct indicator that the install succeeded.
 # ---------------------------------------------------------------------------
 
-_BUILD_DIR = configure.get_build_dir()
-_LLAMACPP_DIR = _BUILD_DIR / "llama.cpp"
-_SD_DIR = _BUILD_DIR / "sd.cpp"
+def _package_installed(package_name: str) -> bool:
+    """Return True if package_name is importable in the current interpreter."""
+    return importlib.util.find_spec(package_name) is not None
+
+
+def get_build_status() -> Dict[str, Any]:
+    """
+    Check whether the pip-installed backend packages are present.
+
+    Returns a dict compatible with what launcher.py and display.py expect:
+        llama_built  : bool  - llama_cpp package importable
+        llama_path   : str   - human-readable location or status string
+        sd_built     : bool  - stable_diffusion_cpp package importable
+        sd_path      : str   - human-readable location or status string
+    """
+    llama_ok = _package_installed("llama_cpp")
+    sd_ok    = _package_installed("stable_diffusion_cpp")
+
+    def _pkg_location(import_name: str) -> str:
+        try:
+            spec = importlib.util.find_spec(import_name)
+            if spec and spec.origin:
+                return str(Path(spec.origin).parent)
+        except Exception:
+            pass
+        return "installed (location unknown)"
+
+    return {
+        "llama_built":  llama_ok,
+        "llama_path":   _pkg_location("llama_cpp") if llama_ok else "",
+        "sd_built":     sd_ok,
+        "sd_path":      _pkg_location("stable_diffusion_cpp") if sd_ok else "",
+        # Legacy keys kept for any code that still references them
+        "llama_source_exists": False,
+        "sd_source_exists":    False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool finders (cmake / git) — kept for any future use; not used at runtime
+# ---------------------------------------------------------------------------
 
 _CMAKE_CANDIDATES = [
     r"C:\Program Files\CMake\bin\cmake.exe",
@@ -300,197 +344,6 @@ def check_prerequisites() -> Dict[str, Any]:
         "vulkan_sdk_path": os.environ.get("VULKAN_SDK", ""),
         "ninja": shutil.which("ninja") is not None,
     }
-
-
-def _detect_generator() -> str:
-    if shutil.which("ninja"):
-        return "Ninja"
-    for ver, gen in [("2022", "Visual Studio 17 2022"),
-                     ("2019", "Visual Studio 16 2019")]:
-        base = Path(rf"C:\Program Files\Microsoft Visual Studio\{ver}")
-        if base.exists():
-            for ed in ("Community", "Professional", "Enterprise"):
-                if (base / ed).exists():
-                    return gen
-    return "Ninja"
-
-
-def _git_clone_or_update(git: Path, url: str, target: Path, msg: Callable,
-                         recursive: bool = False) -> bool:
-    if not target.exists():
-        cmd = [str(git), "clone", "--depth", "1"]
-        if recursive:
-            cmd.append("--recursive")
-        cmd.extend([url, str(target)])
-        try:
-            subprocess.run(cmd, check=True, capture_output=True,
-                           text=True, timeout=300)
-            return True
-        except Exception as e:
-            msg(f"Clone failed: {e}")
-            return False
-    msg(f"Updating {target.name}...")
-    subprocess.run([str(git), "pull", "--ff-only"], cwd=str(target),
-                   check=False, capture_output=True, text=True, timeout=60)
-    if recursive:
-        subprocess.run([str(git), "submodule", "update", "--init", "--recursive"],
-                       cwd=str(target), check=False, capture_output=True,
-                       text=True, timeout=60)
-    return True
-
-
-def build_all(progress_callback: Optional[Callable[[str, float], None]] = None
-              ) -> Dict[str, Any]:
-    t0 = time.time()
-    status: Dict[str, Any] = {
-        "success": False, "llama_status": "pending", "sd_status": "pending",
-        "messages": [], "elapsed_seconds": 0.0,
-    }
-
-    def _msg(text: str, progress: float = 0.0):
-        status["messages"].append(text)
-        if progress_callback:
-            try:
-                progress_callback(text, progress)
-            except Exception:
-                pass
-
-    prereq = check_prerequisites()
-    if not prereq["git"] or not prereq["cmake"]:
-        missing = [k for k in ("git", "cmake") if not prereq[k]]
-        _msg(f"ERROR: {', '.join(missing)} not found.")
-        status["llama_status"] = status["sd_status"] = "skipped"
-        return status
-
-    _BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    cpu = detect_cpu_features()
-    has_vk = detect_vulkan()["vulkan_available"]
-
-    _msg("--- Building llama.cpp ---", 0.05)
-    status["llama_status"] = _build_llamacpp(has_vk, cpu, _msg)
-    _msg(f"llama.cpp: {status['llama_status']}", 0.45)
-
-    _msg("--- Building stable-diffusion.cpp ---", 0.50)
-    status["sd_status"] = _build_sdcpp(has_vk, cpu, _msg)
-    _msg(f"sd.cpp: {status['sd_status']}", 0.95)
-
-    status["success"] = (status["llama_status"] == "success"
-                         and status["sd_status"] == "success")
-    status["elapsed_seconds"] = round(time.time() - t0, 1)
-    _msg(f"Build completed in {status['elapsed_seconds']}s.", 1.0)
-    return status
-
-
-def _build_llamacpp(has_vk: bool, cpu: Dict, _msg: Callable) -> str:
-    git, cmake = find_git(), find_cmake()
-    if not git or not cmake:
-        return "error: missing tools"
-    try:
-        if not _git_clone_or_update(
-                git, "https://github.com/ggerganov/llama.cpp.git",
-                _LLAMACPP_DIR, _msg):
-            return "error: clone failed"
-
-        bdir = _LLAMACPP_DIR / "build"
-        bdir.mkdir(exist_ok=True)
-        gen = _detect_generator()
-        args = [str(cmake), "-B", str(bdir), "-S", str(_LLAMACPP_DIR),
-                "-G", gen]
-        if "Visual Studio" in gen:
-            args.extend(["-A", "x64"])
-        args.extend([
-            "-DCMAKE_BUILD_TYPE=Release", "-DGGML_NATIVE=OFF",
-            "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_BUILD_EXAMPLES=ON",
-            "-DLLAMA_BUILD_SERVER=OFF",
-            "-DGGML_AVX=ON", "-DGGML_AVX2=ON",
-            "-DGGML_F16C=ON", "-DGGML_FMA=ON",
-            f"-DGGML_VULKAN={'ON' if has_vk else 'OFF'}",
-        ])
-        if cpu.get("has_aocl"):
-            aocl = os.environ.get("AOCL_ROOT") or os.environ.get("AOCL_PATH")
-            if aocl:
-                args.extend(["-DBLAS_VENDOR=AOCL",
-                             f"-DCMAKE_PREFIX_PATH={aocl}"])
-
-        _msg("Configuring llama.cpp...", 0.15)
-        r = subprocess.run(args, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            _msg(f"CMake failed: {r.stderr[-500:]}")
-            return "error: cmake configure"
-
-        _msg("Compiling llama.cpp...", 0.25)
-        bcmd = [str(cmake), "--build", str(bdir), "--config", "Release"]
-        if "Ninja" in gen:
-            bcmd.extend(["--parallel",
-                         str(min(os.cpu_count() or 4, 16))])
-        r = subprocess.run(bcmd, capture_output=True, text=True, timeout=900)
-        return "success" if r.returncode == 0 else "error: build failed"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def _build_sdcpp(has_vk: bool, cpu: Dict, _msg: Callable) -> str:
-    git, cmake = find_git(), find_cmake()
-    if not git or not cmake:
-        return "error: missing tools"
-    try:
-        if not _git_clone_or_update(
-                git, "https://github.com/leejet/stable-diffusion.cpp.git",
-                _SD_DIR, _msg, recursive=True):
-            return "error: clone failed"
-
-        bdir = _SD_DIR / "build"
-        bdir.mkdir(exist_ok=True)
-        gen = _detect_generator()
-        args = [str(cmake), "-B", str(bdir), "-S", str(_SD_DIR), "-G", gen]
-        if "Visual Studio" in gen:
-            args.extend(["-A", "x64"])
-        args.append("-DCMAKE_BUILD_TYPE=Release")
-        if has_vk:
-            _msg("Enabling Vulkan for sd.cpp", 0.63)
-            args.append("-DSD_VULKAN=ON")
-
-        _msg("Configuring sd.cpp...", 0.60)
-        r = subprocess.run(args, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0 and has_vk and "SD_VULKAN" in r.stderr:
-            _msg("Retrying without SD_VULKAN...", 0.62)
-            args = [a for a in args if "SD_VULKAN" not in a]
-            r = subprocess.run(args, capture_output=True, text=True,
-                               timeout=120)
-        if r.returncode != 0:
-            _msg(f"CMake failed: {r.stderr[-500:]}")
-            return "error: cmake configure"
-
-        _msg("Compiling sd.cpp...", 0.70)
-        bcmd = [str(cmake), "--build", str(bdir), "--config", "Release"]
-        if "Ninja" in gen:
-            bcmd.extend(["--parallel",
-                         str(min(os.cpu_count() or 4, 16))])
-        r = subprocess.run(bcmd, capture_output=True, text=True, timeout=900)
-        return "success" if r.returncode == 0 else "error: build failed"
-    except Exception as e:
-        return f"error: {e}"
-
-
-def get_build_status() -> Dict[str, Any]:
-    llama_exe = _find_exe("llama-cli", _LLAMACPP_DIR) or _find_exe("main", _LLAMACPP_DIR)
-    sd_exe = _find_exe("sd", _SD_DIR)
-    return {
-        "llama_built": llama_exe is not None,
-        "llama_path": str(llama_exe) if llama_exe else "",
-        "sd_built": sd_exe is not None,
-        "sd_path": str(sd_exe) if sd_exe else "",
-        "llama_source_exists": _LLAMACPP_DIR.exists(),
-        "sd_source_exists": _SD_DIR.exists(),
-    }
-
-
-def _find_exe(name: str, base: Path) -> Optional[Path]:
-    for sub in ("build/bin/Release", "build/bin", "build/Release", "build"):
-        p = base / sub / f"{name}.exe"
-        if p.exists():
-            return p
-    return None
 
 
 # ---------------------------------------------------------------------------

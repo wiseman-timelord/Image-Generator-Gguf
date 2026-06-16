@@ -5,13 +5,18 @@ REM No parentheses in logic per project constraint.
 
 mode con cols=84 lines=30
 powershell -noprofile -command "& { $w = $Host.UI.RawUI; $b = $w.BufferSize; $b.Height = 6000; $w.BufferSize = $b; }"
+
 REM ==== Ensure System32 is on PATH - ping, timeout, where, netsh ====
+REM Prepend System32 without discarding the existing PATH so installed
+REM tools, the venv Scripts folder and Python itself remain reachable.
 set "PATH=%SystemRoot%\System32;%SystemRoot%\System32\Wbem;%PATH%"
+
 REM ==== DP0 TO SCRIPT BLOCK ====
 set "ScriptDirectory=%~dp0"
 set "ScriptDirectory=%ScriptDirectory:~0,-1%"
 cd /d "%ScriptDirectory%"
-echo Dp0'd to: %ScriptDirectory%
+echo Dp0ing to: %ScriptDirectory%
+
 REM ==== Admin Check ====
 net session >nul 2>&1
 if %errorLevel% NEQ 0 (
@@ -30,7 +35,7 @@ if not exist "output"  mkdir output
 if not exist "models"  mkdir models
 if not exist "scripts" mkdir scripts
 
-REM Locate Python system Python, used only to bootstrap installer / venv
+REM Locate system Python - used only to bootstrap installer / venv
 set "SYSPYTHON="
 
 py --version >nul 2>&1
@@ -62,7 +67,7 @@ exit /b 1
 
 :found_python
 
-REM venv python path
+REM venv python path - used to run launcher directly (no activate needed)
 set "VENVPY=venv\Scripts\python.exe"
 
 :menu
@@ -107,20 +112,15 @@ goto :menu
 
 REM -------------------------------------------------------------------------
 :run_program
-REM Activate venv, run launcher, deactivate on return
+REM Run launcher.py directly through the venv python executable.
+REM Using the venv python directly avoids activate.bat PATH issues while
+REM still ensuring all venv packages are available.
 if not exist "%VENVPY%" goto :no_venv
 
 echo.
-echo   Activating venv...
-call venv\Scripts\activate.bat
-
 echo   Starting application at http://127.0.0.1:7860
 echo.
-python launcher.py
-
-echo.
-echo   Deactivating venv...
-call venv\Scripts\deactivate.bat
+"%VENVPY%" launcher.py
 
 echo.
 echo   Application exited. Press any key to return to menu.
@@ -145,10 +145,6 @@ echo.
 %SYSPYTHON% installer.py
 
 echo.
-echo   Deactivating venv if active...
-if exist "venv\Scripts\deactivate.bat" call venv\Scripts\deactivate.bat
-
-echo.
 echo   Press any key to return to menu.
 pause >nul
 goto :menu
@@ -160,3 +156,8 @@ echo.
 echo   Goodbye.
 echo.
 exit /b 0
+
+
+:end_of_script_console
+pause
+exit /b 1
