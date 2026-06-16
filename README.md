@@ -56,7 +56,7 @@ A small program in python with gradio 5...
 - Program needs to install and load without issus.
 - Test UI and json loading/saving.
 - Test inference.
-- Add edot feature.
+- Add edit image feature.
 
 ### Design
 - Page 1 the Interaction page- it will have a text box with a generate button underneath, to the side of that will be configurations for image generation, with dropdown list for reasonable values and sensible default settings and sensible ranges in the lists.
