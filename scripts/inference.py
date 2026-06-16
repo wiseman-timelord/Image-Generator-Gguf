@@ -39,27 +39,35 @@ GGUF_TYPES = {
 # ---------------------------------------------------------------------------
 
 def find_sd_cpp() -> Optional[Path]:
-    bdir = configure.get_build_dir()
-    for sub in ("build/bin/Release", "build/bin", "build/Release", "build"):
-        p = bdir / "sd.cpp" / sub / "sd.exe"
+    """
+    Find sd.exe.  Search order:
+      1. ./data/stable_diffusion_binaries/sd.exe  (compiled by installer)
+      2. PATH
+    """
+    bin_dir = configure.get_sd_bin_dir()
+    for name in ("sd.exe", "sd"):
+        p = bin_dir / name
         if p.exists():
             return p
-    sd = shutil.which("sd")
-    return Path(sd) if sd else None
+    found = shutil.which("sd")
+    return Path(found) if found else None
 
 
 def find_llama_cli() -> Optional[Path]:
-    bdir = configure.get_build_dir()
+    """
+    Find llama-cli.exe.  Search order:
+      1. ./data/llama_cpp_binaries/llama-cli.exe  (compiled by installer)
+      2. PATH
+    """
+    bin_dir = configure.get_llama_bin_dir()
+    for name in ("llama-cli.exe", "llama-cli", "main.exe", "main"):
+        p = bin_dir / name
+        if p.exists():
+            return p
     for name in ("llama-cli", "main"):
-        for sub in ("build/bin/Release", "build/bin",
-                    "build/Release", "build"):
-            p = bdir / "llama.cpp" / sub / f"{name}.exe"
-            if p.exists():
-                return p
-    for name in ("llama-cli", "main"):
-        exe = shutil.which(name)
-        if exe:
-            return Path(exe)
+        found = shutil.which(name)
+        if found:
+            return Path(found)
     return None
 
 

@@ -84,6 +84,14 @@ def get_build_dir() -> Path:
     return _get_project_root() / "data" / "build"
 
 
+def get_llama_bin_dir() -> Path:
+    return _get_project_root() / "data" / "llama_cpp_binaries"
+
+
+def get_sd_bin_dir() -> Path:
+    return _get_project_root() / "data" / "stable_diffusion_binaries"
+
+
 def ensure_data_dirs() -> None:
     root = _get_project_root()
     for d in ("data", "output", "models"):

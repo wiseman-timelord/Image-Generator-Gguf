@@ -6,7 +6,6 @@ system information helpers. Code not more appropriate in other scripts.
 from __future__ import annotations
 
 import ctypes
-import importlib.util
 import os
 import platform
 import shutil
@@ -264,49 +263,63 @@ def get_memory_info() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Build / package status
+# Build / binary status
 # ---------------------------------------------------------------------------
-# The installer installs llama-cpp-python and stable-diffusion-cpp-python as
-# pip wheels into the venv.  There are no standalone C++ executables to find.
-# get_build_status() therefore checks importability of the Python packages,
-# which is the correct indicator that the install succeeded.
+# The installer compiles llama.cpp and stable-diffusion.cpp from source and
+# places the executables in:
+#   ./data/llama_cpp_binaries/llama-cli.exe
+#   ./data/stable_diffusion_binaries/sd.exe
+#
+# get_build_status() checks those locations first, then falls back to PATH.
 # ---------------------------------------------------------------------------
 
-def _package_installed(package_name: str) -> bool:
-    """Return True if package_name is importable in the current interpreter."""
-    return importlib.util.find_spec(package_name) is not None
+def _find_exe_in_dir(directory: Path, names: List[str]) -> Optional[Path]:
+    """Return the first name found in directory, or None."""
+    for name in names:
+        p = directory / name
+        if p.exists():
+            return p
+    return None
 
 
 def get_build_status() -> Dict[str, Any]:
     """
-    Check whether the pip-installed backend packages are present.
+    Check whether the compiled C++ backend executables are present.
 
-    Returns a dict compatible with what launcher.py and display.py expect:
-        llama_built  : bool  - llama_cpp package importable
-        llama_path   : str   - human-readable location or status string
-        sd_built     : bool  - stable_diffusion_cpp package importable
-        sd_path      : str   - human-readable location or status string
+    Looks in:
+      1. ./data/llama_cpp_binaries/       for llama-cli.exe
+      2. ./data/stable_diffusion_binaries/ for sd.exe
+      3. PATH (shutil.which) as fallback
+
+    Returns a dict compatible with launcher.py and display.py:
+        llama_built  : bool  - llama-cli.exe found
+        llama_path   : str   - path string or ""
+        sd_built     : bool  - sd.exe found
+        sd_path      : str   - path string or ""
     """
-    llama_ok = _package_installed("llama_cpp")
-    sd_ok    = _package_installed("stable_diffusion_cpp")
+    llama_bin_dir = configure.get_llama_bin_dir()
+    sd_bin_dir    = configure.get_sd_bin_dir()
 
-    def _pkg_location(import_name: str) -> str:
-        try:
-            spec = importlib.util.find_spec(import_name)
-            if spec and spec.origin:
-                return str(Path(spec.origin).parent)
-        except Exception:
-            pass
-        return "installed (location unknown)"
+    # llama-cli
+    llama_exe = _find_exe_in_dir(llama_bin_dir, ["llama-cli.exe", "llama-cli"])
+    if not llama_exe:
+        found = shutil.which("llama-cli") or shutil.which("main")
+        llama_exe = Path(found) if found else None
+
+    # sd
+    sd_exe = _find_exe_in_dir(sd_bin_dir, ["sd.exe", "sd"])
+    if not sd_exe:
+        found = shutil.which("sd")
+        sd_exe = Path(found) if found else None
 
     return {
-        "llama_built":  llama_ok,
-        "llama_path":   _pkg_location("llama_cpp") if llama_ok else "",
-        "sd_built":     sd_ok,
-        "sd_path":      _pkg_location("stable_diffusion_cpp") if sd_ok else "",
+        "llama_built":  llama_exe is not None,
+        "llama_path":   str(llama_exe) if llama_exe else "",
+        "sd_built":     sd_exe is not None,
+        "sd_path":      str(sd_exe) if sd_exe else "",
         # Legacy keys kept for any code that still references them
-        "llama_source_exists": False,
-        "sd_source_exists":    False,
+        "llama_source_exists": llama_exe is not None,
+        "sd_source_exists":    sd_exe is not None,
     }
 
 

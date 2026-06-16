@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """
 installer.py - Standalone setup script for Image Generator GGUF.
-
 Detects hardware (CPU cores/threads, Vulkan GPUs), creates a venv,
 installs Python dependencies, then installs llama-cpp-python and
 stable-diffusion-cpp-python via pip wheels (pre-built where available,
 compiled from source with CPU/Vulkan flags where not).
-
 Writes:
-    ./data/constants.ini   - hardware constants, thread counts, GPU info
-    ./data/persistent.json - default user config (only if absent)
-
+./data/constants.ini   - hardware constants, thread counts, GPU info
+./data/persistent.json - default user config (only if absent)
 No imports from scripts.* — this is self-contained.
 """
-
 from __future__ import annotations
-
 import argparse
 import configparser
 import ctypes
@@ -28,16 +23,13 @@ import stat
 import struct
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-
 # ---------------------------------------------------------------------------
 # Project layout
 # ---------------------------------------------------------------------------
-
 _ROOT = Path(__file__).resolve().parent
 _DATA_DIR    = _ROOT / "data"
 _VENV_DIR    = _ROOT / "venv"
@@ -53,33 +45,45 @@ REQUIREMENTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Backend wheel constants
+# Centralized CPU Features Map
+# Maps internal key, display name, and ggml CMake flag.
+# Used globally for detection, logging, config writing, and building.
 # ---------------------------------------------------------------------------
+CPU_FEATURES = [
+    {"key": "has_sse",      "name": "SSE",    "cmake": "GGML_SSE=ON"},
+    {"key": "has_sse2",     "name": "SSE2",   "cmake": "GGML_SSE2=ON"},
+    {"key": "has_sse3",     "name": "SSE3",   "cmake": "GGML_SSE3=ON"},
+    {"key": "has_ssse3",    "name": "SSSE3",  "cmake": "GGML_SSSE3=ON"},
+    {"key": "has_sse4_1",   "name": "SSE4.1", "cmake": "GGML_SSE4_1=ON"},
+    {"key": "has_sse4_2",   "name": "SSE4.2", "cmake": "GGML_SSE4_2=ON"},
+    {"key": "has_avx",      "name": "AVX",    "cmake": "GGML_AVX=ON"},
+    {"key": "has_avx2",     "name": "AVX2",   "cmake": "GGML_AVX2=ON"},
+    {"key": "has_f16c",     "name": "F16C",   "cmake": "GGML_F16C=ON"},
+    {"key": "has_fma",      "name": "FMA",    "cmake": "GGML_FMA=ON"},
+    {"key": "has_avx512",   "name": "AVX512", "cmake": "GGML_AVX512=ON"},
+]
 
-# llama-cpp-python: pre-built Vulkan wheel index (abetlen)
-LLAMA_CPP_VULKAN_INDEX  = "https://abetlen.github.io/llama-cpp-python/whl/vulkan"
-# llama-cpp-python: pre-built CPU wheel (eswarthammana, pinned stable version)
-LLAMA_CPP_CPU_VERSION   = "0.3.16"
-LLAMA_CPP_CPU_WHEEL_BASE = (
-    "https://github.com/eswarthammana/llama-cpp-wheels/releases/download/"
-    "v{ver}/llama_cpp_python-{ver}-{pytag}-{pytag}-win_amd64.whl"
-)
-# stable-diffusion-cpp-python: source build only (no Vulkan binary wheel exists)
-SD_CPP_PACKAGE          = "stable-diffusion-cpp-python"
-# Retry settings for pip builds
-BUILD_MAX_RETRIES       = 3
-BUILD_RETRY_DELAY       = 10
-# Inactivity timeout for long pip builds (seconds)
-BUILD_INACTIVITY_TIMEOUT = 600
+# ---------------------------------------------------------------------------
+# Backend source build constants
+# ---------------------------------------------------------------------------
+LLAMA_CPP_SOURCE_URL = "https://github.com/ggml-org/llama.cpp.git"
+LLAMA_CPP_SOURCE_DIR = "lc_src"   # Short name keeps paths under MAX_PATH for MSBuild FileTracker
 
+SD_CPP_SOURCE_URL = "https://github.com/leejet/stable-diffusion.cpp.git"
+SD_CPP_SOURCE_DIR = "sd_src"      # Short name keeps paths under MAX_PATH for MSBuild FileTracker
+
+LLAMA_BIN_DIR = "data/llama_cpp_binaries"
+SD_BIN_DIR    = "data/stable_diffusion_binaries"
+
+BUILD_MAX_RETRIES        = 2
+BUILD_RETRY_DELAY        = 15
+BUILD_INACTIVITY_TIMEOUT = 900
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-
 def log(msg: str = "") -> None:
     print(f"  {msg}" if msg else "")
-
 
 def header(title: str) -> None:
     os.system("cls" if platform.system() == "Windows" else "clear")
@@ -89,38 +93,27 @@ def header(title: str) -> None:
     print("  " + "=" * 78)
     print()
 
-
 def section(title: str) -> None:
-    """Inline section label — no cls, scrolls with the install log."""
     print()
     print(f"  {title}")
     print("  " + "-" * len(title))
 
-
 def _safe_rmtree(path: Path) -> bool:
-    """Remove a directory tree on Windows, clearing read-only flags first.
-    Git pack files and index files are often marked read-only, which causes
-    a plain shutil.rmtree to raise PermissionError on Windows.
-    Returns True if the directory is gone afterwards.
-    """
     def _on_error(func, fpath, exc_info):
-        # Clear read-only bit and retry
         try:
             os.chmod(fpath, stat.S_IWRITE)
             func(fpath)
         except Exception:
             pass
-
+            
     if not path.exists():
         return True
     shutil.rmtree(path, onerror=_on_error)
     return not path.exists()
 
-
 # ---------------------------------------------------------------------------
 # Directory setup
 # ---------------------------------------------------------------------------
-
 def ensure_dirs() -> None:
     for d in (_DATA_DIR, _MODELS_DIR, _OUTPUT_DIR, _ROOT / "scripts"):
         d.mkdir(parents=True, exist_ok=True)
@@ -128,32 +121,26 @@ def ensure_dirs() -> None:
     if not init.exists():
         init.write_text("# scripts package\n", encoding="utf-8")
 
-
 # ---------------------------------------------------------------------------
 # CPU detection
 # ---------------------------------------------------------------------------
-
 def detect_cpu() -> Dict[str, Any]:
     logical = os.cpu_count() or 4
     default_threads = max(1, math.ceil(logical * 0.85))
-    arch = _cpu_arch()
     brand = platform.processor() or "unknown"
     vendor = "unknown"
-
+    
     info: Dict[str, Any] = {
-        "arch": arch,
+        "arch": "x86_64",
         "brand": brand,
         "vendor": vendor,
         "cores_logical": logical,
         "default_threads": default_threads,
-        "has_avx": False,
-        "has_avx2": False,
-        "has_f16c": False,
-        "has_fma": False,
-        "has_avx512": False,
-        "has_sse4_2": False,
         "has_aocl": False,
     }
+    
+    for feat in CPU_FEATURES:
+        info[feat["key"]] = False
 
     if platform.system() == "Windows":
         try:
@@ -166,50 +153,54 @@ def detect_cpu() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Try py-cpuinfo for exact flags
     try:
         import cpuinfo  # type: ignore
         ci = cpuinfo.get_cpu_info()
         fl = [x.lower() for x in ci.get("flags", [])]
-        info.update(
-            has_avx="avx" in fl,
-            has_avx2="avx2" in fl,
-            has_f16c="f16c" in fl,
-            has_fma="fma" in fl,
-            has_sse4_2="sse4_2" in fl,
-            has_avx512=any("avx512" in x for x in fl),
-        )
+        
+        for feat in CPU_FEATURES:
+            flag_name = feat["key"].replace("has_", "")
+            if flag_name == "avx512":
+                info[feat["key"]] = "avx512f" in fl or "avx512" in fl
+            else:
+                info[feat["key"]] = flag_name in fl
+                
         if ci.get("brand_raw"):
             info["brand"] = ci["brand_raw"]
     except ImportError:
-        # Fallback: infer from CPU name
         n = info["brand"].lower()
         is_amd = any(k in n for k in ("amd", "ryzen", "epyc", "threadripper"))
-        is_intel = any(k in n for k in ("intel", "core", "xeon"))
+        is_intel = any(k in n for k in ("intel", "core", "xeon", "pentium", "celeron"))
+        
         if is_amd:
             info["vendor"] = "AMD"
-            info.update(has_avx=True, has_avx2=True, has_f16c=True,
-                        has_fma=True, has_sse4_2=True)
+            info.update(has_sse=True, has_sse2=True, has_sse3=True, has_ssse3=True,
+                        has_sse4_1=True, has_sse4_2=True, has_avx=True, has_avx2=True,
+                        has_f16c=True, has_fma=True)
+            if any(k in n for k in ("ryzen 7", "ryzen 9", "ryzen threadripper 7", "epyc 9", "epyc 8", "zen 4", "zen 5")):
+                info["has_avx512"] = True
         elif is_intel:
             info["vendor"] = "Intel"
-            info.update(has_avx=True, has_sse4_2=True)
-            if any(k in n for k in ("haswell", "broadwell", "skylake",
-                                    "kaby", "coffee", "comet", "ice",
-                                    "tiger", "alder", "raptor", "arrow",
-                                    "meteor", "ultra")):
+            info.update(has_sse=True, has_sse2=True, has_sse3=True, has_ssse3=True,
+                        has_sse4_1=True, has_sse4_2=True, has_avx=True)
+            if any(k in n for k in ("haswell", "broadwell", "skylake", "kaby", "coffee",
+                                    "comet", "ice", "tiger", "alder", "raptor", "meteor",
+                                    "arrow", "lunar", "ultra")):
                 info.update(has_avx2=True, has_f16c=True, has_fma=True)
-        elif arch == "x86_64":
-            info.update(has_avx=True, has_avx2=True, has_f16c=True,
-                        has_fma=True, has_sse4_2=True)
+            if any(k in n for k in ("skylake-x", "cascade lake", "ice lake", "tiger lake",
+                                    "sapphire rapids", "emerald rapids", "granite rapids")):
+                info["has_avx512"] = True
+        else:
+            info.update(has_sse=True, has_sse2=True, has_sse3=True, has_ssse3=True,
+                        has_sse4_1=True, has_sse4_2=True, has_avx=True, has_avx2=True,
+                        has_f16c=True, has_fma=True)
 
-    # AOCL
     for p in (os.environ.get("AOCL_ROOT", ""), os.environ.get("AOCL_PATH", ""),
               r"C:\Program Files\AMD\AOCL", r"C:\AOCL"):
         if p and Path(p).exists():
             info["has_aocl"] = True
             break
-
-    # Vendor from brand if not set
+            
     if info["vendor"] == "unknown":
         n = info["brand"].lower()
         if any(k in n for k in ("amd", "ryzen", "epyc")):
@@ -217,40 +208,15 @@ def detect_cpu() -> Dict[str, Any]:
         elif "intel" in n:
             info["vendor"] = "Intel"
 
-    # cmake flags
-    flags = []
-    for feat, flag in (("has_avx", "GGML_AVX=ON"), ("has_avx2", "GGML_AVX2=ON"),
-                       ("has_f16c", "GGML_F16C=ON"), ("has_fma", "GGML_FMA=ON"),
-                       ("has_avx512", "GGML_AVX512=ON")):
-        if info[feat]:
-            flags.append(flag)
-    info["cmake_flags"] = flags
-
+    info["cmake_flags"] = [feat["cmake"] for feat in CPU_FEATURES if info.get(feat["key"])]
     return info
-
-
-def _cpu_arch() -> str:
-    m = platform.machine().lower()
-    if m in ("amd64", "x86_64"):
-        return "x86_64"
-    if m in ("i386", "i686", "x86"):
-        return "x86"
-    if "aarch64" in m:
-        return "aarch64"
-    return m
-
 
 # ---------------------------------------------------------------------------
 # Vulkan / GPU detection
 # ---------------------------------------------------------------------------
 def _parse_vk_devices_from_text(text: str) -> List[Dict[str, Any]]:
-    """Parse GPU devices from full vulkaninfo text output.
-    Lines look like: "GPU id = 0 (NVIDIA GeForce GTX 1060 3GB)"
-    Captures full name even when it contains parentheses.
-    """
     import re
     devices = []
-    # Pattern: GPU id = digits, space, (, any characters, ) at end of line
     pattern = re.compile(r"GPU id = (\d+)\s*\((.*)\)$")
     for line in text.splitlines():
         m = pattern.search(line)
@@ -259,13 +225,11 @@ def _parse_vk_devices_from_text(text: str) -> List[Dict[str, Any]]:
             name = m.group(2).strip()
             if not any(d["index"] == idx for d in devices):
                 devices.append({"index": idx, "name": name, "type": ""})
-    # If the above fails, fallback to block parsing (GPU0: ... deviceName = ...)
     if not devices:
         devices = _parse_vk_devices_from_blocks(text)
     return devices
 
 def _parse_vk_devices_from_blocks(text: str) -> List[Dict[str, Any]]:
-    """Fallback: parse from GPU0: / GPU1: blocks."""
     import re
     devices = []
     blocks = re.split(r'\nGPU(\d+):\n', text)
@@ -284,14 +248,11 @@ def detect_vulkan() -> Dict[str, Any]:
         "available": False,
         "version": "unknown",
         "sdk": os.environ.get("VULKAN_SDK", ""),
-        "devices": [],        # list of {"index": int, "name": str, "type": str}
+        "devices": [],
     }
-
     vi = shutil.which("vulkaninfo")
     if not vi:
         return result
-
-    # Try JSON output first (most reliable)
     try:
         proc = subprocess.run([vi, "--json"], capture_output=True, text=True, timeout=30)
         if proc.returncode == 0 and proc.stdout.strip():
@@ -303,10 +264,10 @@ def detect_vulkan() -> Dict[str, Any]:
                 dev_list = data
             else:
                 dev_list = []
-                for v in data.values():
-                    if isinstance(v, list) and v and "deviceName" in v[0]:
-                        dev_list = v
-                        break
+            for v in data.values():
+                if isinstance(v, list) and v and "deviceName" in v[0]:
+                    dev_list = v
+                    break
             for i, d in enumerate(dev_list):
                 if isinstance(d, dict):
                     idx = d.get("deviceID", d.get("deviceId", i))
@@ -320,8 +281,6 @@ def detect_vulkan() -> Dict[str, Any]:
                 return result
     except Exception:
         pass
-
-    # Fallback: parse full text output
     try:
         proc = subprocess.run([vi], capture_output=True, text=True, timeout=30)
         if proc.returncode == 0:
@@ -330,8 +289,6 @@ def detect_vulkan() -> Dict[str, Any]:
             result["version"] = _parse_vk_version(proc.stdout)
     except Exception:
         pass
-
-    # Last resort: check if DLL exists (Windows)
     if not result["available"] and platform.system() == "Windows":
         try:
             ctypes.windll.LoadLibrary("vulkan-1.dll")
@@ -339,9 +296,7 @@ def detect_vulkan() -> Dict[str, Any]:
             result["version"] = "1.x"
         except Exception:
             pass
-
     return result
-
 
 def _parse_vk_version(stdout: str) -> str:
     for line in stdout.splitlines():
@@ -350,42 +305,15 @@ def _parse_vk_version(stdout: str) -> str:
                 return tok
     return "detected"
 
-def _parse_vk_devices(stdout: str) -> List[Dict[str, Any]]:
-    devices: List[Dict[str, Any]] = []
-    current: Dict[str, Any] = {}
-    for line in stdout.splitlines():
-        s = line.strip()
-        if s.startswith("GPU") and "=" in s:
-            if current:
-                devices.append(current)
-            idx_str = s.split("=")[0].replace("GPU", "").strip()
-            try:
-                idx = int(idx_str)
-            except ValueError:
-                idx = len(devices)
-            current = {"index": idx, "name": s.split("=", 1)[1].strip(), "type": ""}
-        elif current:
-            sl = s.lower().replace(" ", "")
-            if sl.startswith("devicetype"):
-                current["type"] = s.split("=", 1)[-1].strip()
-    if current:
-        devices.append(current)
-    return devices
-
-
 # ---------------------------------------------------------------------------
 # Write constants.ini
 # ---------------------------------------------------------------------------
-
 def write_constants(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     cfg = configparser.ConfigParser()
-
-    # Read existing so we don't wipe user edits in other sections
     if _CONST_PATH.exists():
         cfg.read(_CONST_PATH, encoding="utf-8")
-
-    # [cpu]
+        
     if not cfg.has_section("cpu"):
         cfg.add_section("cpu")
     cfg["cpu"]["brand"]           = cpu["brand"]
@@ -393,44 +321,38 @@ def write_constants(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     cfg["cpu"]["arch"]            = cpu["arch"]
     cfg["cpu"]["cores_logical"]   = str(cpu["cores_logical"])
     cfg["cpu"]["default_threads"] = str(cpu["default_threads"])
-    cfg["cpu"]["has_avx"]         = str(cpu["has_avx"])
-    cfg["cpu"]["has_avx2"]        = str(cpu["has_avx2"])
-    cfg["cpu"]["has_f16c"]        = str(cpu["has_f16c"])
-    cfg["cpu"]["has_fma"]         = str(cpu["has_fma"])
-    cfg["cpu"]["has_avx512"]      = str(cpu["has_avx512"])
-    cfg["cpu"]["has_sse4_2"]      = str(cpu["has_sse4_2"])
     cfg["cpu"]["has_aocl"]        = str(cpu["has_aocl"])
     cfg["cpu"]["cmake_flags"]     = " ".join(cpu["cmake_flags"])
-
-    # [vulkan]
+    
+    for feat in CPU_FEATURES:
+        cfg["cpu"][feat["key"]] = str(cpu.get(feat["key"], False))
+    
     if not cfg.has_section("vulkan"):
         cfg.add_section("vulkan")
     cfg["vulkan"]["available"]    = str(vk["available"])
     cfg["vulkan"]["version"]      = vk["version"]
     cfg["vulkan"]["sdk"]          = vk["sdk"]
-    # gpu_count: number of discrete GPUs found
+    
     gpu_indices = [str(d["index"]) for d in vk["devices"]]
     gpu_names   = [d["name"] for d in vk["devices"]]
     cfg["vulkan"]["gpu_count"]    = str(len(vk["devices"]))
-    cfg["vulkan"]["gpu_numbers"]  = ",".join(gpu_indices)   # e.g. "0,1"
-    cfg["vulkan"]["gpu_names"]    = ",".join(gpu_names)     # e.g. "RX 580,RX 470"
-    # Per-GPU entries for easy lookup
+    cfg["vulkan"]["gpu_numbers"]  = ",".join(gpu_indices)
+    cfg["vulkan"]["gpu_names"]    = ",".join(gpu_names)
+    
     for d in vk["devices"]:
         cfg["vulkan"][f"gpu{d['index']}_name"] = d["name"]
         cfg["vulkan"][f"gpu{d['index']}_type"] = d.get("type", "")
-
+        
     with open(_CONST_PATH, "w", encoding="utf-8") as f:
         cfg.write(f)
     log(f"constants.ini written → {_CONST_PATH}")
 
-
 # ---------------------------------------------------------------------------
 # Write default persistent.json (only if missing)
 # ---------------------------------------------------------------------------
-
 def write_default_persistent(cpu: Dict[str, Any]) -> None:
     if _PERSIST_PATH.exists():
-        return  # never overwrite user config
+        return
     dt = cpu["default_threads"]
     defaults: Dict[str, Any] = {
         "encoder_model_path": "", "encoder_model_name": "",
@@ -466,28 +388,19 @@ def write_default_persistent(cpu: Dict[str, Any]) -> None:
     tmp.replace(_PERSIST_PATH)
     log(f"persistent.json written → {_PERSIST_PATH}")
 
-
 # ---------------------------------------------------------------------------
 # venv helpers
 # ---------------------------------------------------------------------------
-
 def _venv_python() -> Path:
     if platform.system() == "Windows":
         return _VENV_DIR / "Scripts" / "python.exe"
     return _VENV_DIR / "bin" / "python"
 
-
-def _venv_pip() -> Path:
-    if platform.system() == "Windows":
-        return _VENV_DIR / "Scripts" / "pip.exe"
-    return _VENV_DIR / "bin" / "pip"
-
-
 def create_venv() -> bool:
     if _venv_python().exists():
         log(f"venv already exists at {_VENV_DIR}")
         return True
-    log(f"Creating venv at {_VENV_DIR} ...")
+    log(f"Creating venv at {_VENV_DIR}...")
     try:
         subprocess.run(
             [sys.executable, "-m", "venv", str(_VENV_DIR)],
@@ -498,7 +411,6 @@ def create_venv() -> bool:
     except Exception as e:
         log(f"ERROR creating venv: {e}")
         return False
-
 
 def install_deps() -> bool:
     vpy = _venv_python()
@@ -513,10 +425,9 @@ def install_deps() -> bool:
         )
     except Exception as e:
         log(f"pip upgrade warning: {e}")
-
     all_ok = True
     for req in REQUIREMENTS:
-        log(f"  Installing {req} ...")
+        log(f"  Installing {req}...")
         try:
             subprocess.run(
                 [str(vpy), "-m", "pip", "install", req],
@@ -529,17 +440,13 @@ def install_deps() -> bool:
             all_ok = False
     return all_ok
 
-
 # ---------------------------------------------------------------------------
-# Build tools detection (used only for banner display and cmake wheel check)
+# Build tools detection
 # ---------------------------------------------------------------------------
-
 def _find_cmake_in_vs_installations() -> Optional[Path]:
-    """Return the cmake.exe bin directory from a VS / Build Tools install, or None."""
     prog_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
     prog_files     = os.environ.get("ProgramFiles",       r"C:\Program Files")
     install_roots: List[str] = []
-
     vswhere_exe = Path(prog_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if vswhere_exe.exists():
         try:
@@ -551,14 +458,12 @@ def _find_cmake_in_vs_installations() -> Optional[Path]:
                 install_roots = [p.strip() for p in result.stdout.splitlines() if p.strip()]
         except Exception:
             pass
-
     for base in (prog_files_x86, prog_files):
         for year in ("2022", "2019"):
             for edition in ("BuildTools", "Enterprise", "Professional", "Community", "Preview"):
                 candidate = os.path.join(base, "Microsoft Visual Studio", year, edition)
                 if os.path.isdir(candidate) and candidate not in install_roots:
                     install_roots.append(candidate)
-
     for root in install_roots:
         cmake_bin = os.path.join(root, "Common7", "IDE", "CommonExtensions",
                                  "Microsoft", "CMake", "CMake", "bin")
@@ -566,7 +471,6 @@ def _find_cmake_in_vs_installations() -> Optional[Path]:
         if os.path.isfile(cmake_exe):
             return Path(cmake_bin)
     return None
-
 
 def find_cmake() -> Optional[Path]:
     c = shutil.which("cmake")
@@ -582,222 +486,300 @@ def find_cmake() -> Optional[Path]:
             return Path(p)
     return None
 
-
 def find_git() -> Optional[Path]:
     g = shutil.which("git")
     return Path(g) if g else None
 
-
 # ---------------------------------------------------------------------------
-# pip install with live output + inactivity watchdog
-# (adapted from reference installer; used for long C++ source builds)
+# Build root — short temp path if project root is too deep for MSBuild
 # ---------------------------------------------------------------------------
+# MSBuild's FileTracker (tracker.exe) cannot create .tlog files when the full
+# path exceeds ~260 chars (Windows MAX_PATH). The ggml vulkan-shaders-gen
+# ExternalProject adds ~100 chars of its own nesting on top of the build root,
+# so any project root longer than ~150 chars risks FTK1011 errors at link time.
+#
+# Strategy: if the project root is short enough, build inside data/build as
+# normal. If it is too long, redirect the entire build tree to C:\build_temp\igg\
+# (short and fixed). After binaries are copied out, the temp tree is cleaned up.
+#
+# No registry modification is made. The system is not permanently altered.
 
-def _pip_install_watched(pip_exe: Path, args: List[str],
-                         max_retries: int = BUILD_MAX_RETRIES,
-                         initial_delay: float = BUILD_RETRY_DELAY) -> bool:
-    """Run pip install <args> with streaming output and an inactivity watchdog.
-    Retries up to max_retries times with exponential backoff.
-    Returns True on success.
+_BUILD_TEMP_ROOT = Path(r"C:\build_temp\igg")
+_PATH_SAFETY_THRESHOLD = 150   # chars; project root longer than this -> use temp
+
+
+def _get_build_root() -> Tuple[Path, bool]:
     """
-    _PROGRESS_KW = ("downloading", "installing", "collected", "building",
-                    "running", "error", "warning", "failed", "%", "->")
-    _SUPPRESS_KW = ("pip's dependency resolver",)
-
-    delay = float(initial_delay)
-    cmd   = [str(pip_exe), "install"] + args
-
-    for attempt in range(1, max_retries + 1):
-        all_output: List[str] = []
-        last_activity         = [time.time()]
-        reader_done           = [False]
-        stall_reason: List[Optional[str]] = [None]
-
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1)
-
-            def _read():
-                try:
-                    for raw in proc.stdout:
-                        line = raw.rstrip()
-                        if not line:
-                            continue
-                        if any(kw in line.lower() for kw in _SUPPRESS_KW):
-                            continue
-                        last_activity[0] = time.time()
-                        all_output.append(line)
-                        if any(kw in line.lower() for kw in _PROGRESS_KW):
-                            log(f"  {line}")
-                finally:
-                    reader_done[0] = True
-
-            t = threading.Thread(target=_read, daemon=True)
-            t.start()
-
-            while not reader_done[0]:
-                time.sleep(2)
-                idle = time.time() - last_activity[0]
-                if idle >= BUILD_INACTIVITY_TIMEOUT:
-                    stall_reason[0] = f"No output for {idle:.0f}s — stalled"
-                    proc.kill()
-                    break
-
-            t.join(timeout=5)
-            proc.wait()
-
-            combined = "\n".join(all_output).lower()
-            if proc.returncode == 0 or "already satisfied" in combined:
-                return True
-
-            reason = stall_reason[0]
-            if not reason:
-                errs = [l for l in all_output if "error" in l.lower()]
-                reason = errs[-1][:120] if errs else f"exit code {proc.returncode}"
-
-            if attempt < max_retries:
-                log(f"  Attempt {attempt}/{max_retries} failed: {reason}")
-                log(f"  Retrying in {delay:.0f}s ...")
-                time.sleep(delay)
-                delay = min(delay * 2, 300)
-
-        except Exception as e:
-            if attempt < max_retries:
-                log(f"  Unexpected error: {e}  — retrying in {delay:.0f}s ...")
-                time.sleep(delay)
-                delay = min(delay * 2, 300)
-
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Backend installation — pip wheels
-# ---------------------------------------------------------------------------
-
-def _py_tag() -> str:
-    return f"cp{sys.version_info.major}{sys.version_info.minor}"
-
-
-def install_llama_cpp_python(cpu: Dict[str, Any], use_vulkan: bool) -> str:
-    """Install llama-cpp-python.
-
-    use_vulkan=True  → pre-built Vulkan wheel from abetlen index
-    use_vulkan=False → pre-built CPU wheel (eswarthammana v0.3.16);
-                       falls back to source compile with CPU flags only
-                       if the pre-built wheel is unavailable for this Python version.
-
-    Returns "success (...)" or an error string.
+    Return (build_root_path, using_temp).
+    using_temp=True means the caller must delete build_root after copying binaries.
     """
-    pip = _venv_pip()
-    if not pip.exists():
-        return "error: venv pip not found"
+    root_len = len(str(_ROOT))
+    if root_len > _PATH_SAFETY_THRESHOLD:
+        log(f"  Project root is {root_len} chars — redirecting build to {_BUILD_TEMP_ROOT}")
+        log(f"  (temp build tree will be deleted after binaries are copied)")
+        return _BUILD_TEMP_ROOT, True
+    return _ROOT / "data" / "build", False
 
-    if use_vulkan:
-        log("  llama-cpp-python: installing Vulkan pre-built wheel ...")
-        ok = _pip_install_watched(pip, [
-            "llama-cpp-python",
-            "--prefer-binary",
-            "--extra-index-url", LLAMA_CPP_VULKAN_INDEX,
-            "--force-reinstall",
-            "--no-cache-dir",
-        ])
-        if ok:
-            return "success (Vulkan wheel)"
-        return "error: Vulkan wheel install failed"
 
-    # CPU path — try pre-built wheel first
-    ver    = LLAMA_CPP_CPU_VERSION
-    pytag  = _py_tag()
-    whl_url = LLAMA_CPP_CPU_WHEEL_BASE.format(ver=ver, pytag=pytag)
-    log(f"  llama-cpp-python: installing CPU pre-built wheel v{ver} ...")
-    ok = _pip_install_watched(pip, [
-        whl_url,
-        "--force-reinstall",
-        "--no-cache-dir",
-    ])
-    if ok:
-        return "success (CPU wheel)"
+def _cleanup_build_temp(build_root: Path, using_temp: bool) -> None:
+    """Remove the temporary build tree if one was used."""
+    if not using_temp:
+        return
+    log(f"  Cleaning up temporary build tree at {build_root} ...")
+    if _safe_rmtree(build_root):
+        log("  Temp build tree removed.")
+    else:
+        log(f"  WARNING: could not fully remove temp build tree at {build_root}.")
+        log("  You may delete it manually.")
 
-    # Pre-built wheel unavailable for this Python version — compile from source
-    log("  Pre-built wheel unavailable — compiling from source with CPU flags ...")
-    cmake_args_str = " ".join(f"-D{f}" for f in cpu["cmake_flags"])
-    env_patch: Dict[str, str] = {"FORCE_CMAKE": "1"}
-    if cmake_args_str:
-        env_patch["CMAKE_ARGS"] = cmake_args_str
-    old_env = os.environ.copy()
-    os.environ.update(env_patch)
+# ---------------------------------------------------------------------------
+# Git clone helper (Replaces unreliable urllib zip downloads)
+# ---------------------------------------------------------------------------
+def _git_clone(repo_url: str, dest_dir: Path, ref: str) -> bool:
+    git_exe = find_git()
+    if git_exe is None:
+        log("  ERROR: git not found. Cannot clone repository.")
+        return False
+    
+    if dest_dir.exists():
+        if (dest_dir / ".git").exists():
+            log(f"  Source directory already exists at {dest_dir}, skipping clone.")
+            return True
+        else:
+            log(f"  Directory {dest_dir} exists but is not a git repo. Removing and recloning...")
+            _safe_rmtree(dest_dir)
+
+    repo_name = repo_url.split('/')[-1].replace('.git', '')
+    log(f"  Cloning {repo_name} (ref: {ref}) with submodules...")
+    
     try:
-        ok = _pip_install_watched(pip, [
-            "llama-cpp-python",
-            "--no-binary", "llama-cpp-python",
-            "--no-cache-dir",
-            "--force-reinstall",
-        ])
-    finally:
-        os.environ.clear()
-        os.environ.update(old_env)
-    return "success (compiled CPU)" if ok else "error: all strategies failed"
+        subprocess.run([str(git_exe), "config", "--global", "core.longpaths", "true"], 
+                       capture_output=True, check=False)
+    except Exception:
+        pass
 
+    cmd = [
+        str(git_exe), "clone", 
+        "--depth", "1", 
+        "--recurse-submodules", 
+        "--branch", ref, 
+        repo_url, 
+        str(dest_dir)
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=False, text=True, timeout=600)
+        if proc.returncode == 0:
+            log("  Clone complete.")
+            return True
+        else:
+            log(f"  ERROR cloning (exit code {proc.returncode}).")
+            return False
+    except subprocess.TimeoutExpired:
+        log("  ERROR: git clone timed out.")
+        return False
+    except Exception as e:
+        log(f"  ERROR cloning: {e}")
+        return False
 
-def install_sd_cpp_python(cpu: Dict[str, Any], use_vulkan: bool) -> str:
-    """Install stable-diffusion-cpp-python from source.
+def _run_cmake_build(source_dir: Path, build_dir: Path,
+                     cmake_defs: List[str], jobs: int) -> bool:
+    cmake_exe = find_cmake()
+    if not cmake_exe:
+        log("  ERROR: cmake not found. Install CMake or Visual Studio Build Tools.")
+        return False
+        
+    build_dir.mkdir(parents=True, exist_ok=True)
+    d_args = [f"-D{d}" for d in cmake_defs]
+    configure_cmd = [
+        str(cmake_exe),
+        str(source_dir),
+        "-B", str(build_dir),
+        "-DCMAKE_BUILD_TYPE=Release",
+    ] + d_args
+    
+    log(f"  cmake configure: {' '.join(d_args)}")
+    try:
+        proc = subprocess.run(
+            configure_cmd, capture_output=False,
+            timeout=300, cwd=str(source_dir),
+        )
+        if proc.returncode != 0:
+            log(f"  cmake configure failed (exit {proc.returncode})")
+            return False
+    except Exception as e:
+        log(f"  cmake configure error: {e}")
+        return False
+        
+    build_cmd = [
+        str(cmake_exe), "--build", str(build_dir),
+        "--config", "Release",
+        "--parallel", str(jobs),
+    ]
+    log(f"  cmake build (--parallel {jobs})...")
+    try:
+        proc = subprocess.run(
+            build_cmd, capture_output=False,
+            timeout=BUILD_INACTIVITY_TIMEOUT,
+        )
+        if proc.returncode != 0:
+            log(f"  cmake build failed (exit {proc.returncode})")
+            return False
+    except Exception as e:
+        log(f"  cmake build error: {e}")
+        return False
+        
+    return True
 
-    No pre-built binary wheel exists on PyPI — this package always builds
-    from source. CMAKE_ARGS controls Vulkan and CPU optimisation flags.
-
-    use_vulkan=True  → SD_VULKAN=ON + CPU flags
-    use_vulkan=False → CPU flags only
-
-    Returns "success (...)" or an error string.
-    """
-    pip = _venv_pip()
-    if not pip.exists():
-        return "error: venv pip not found"
-
-    # Pre-install cmake binary wheel so the build backend can find cmake
-    log("  Pre-installing cmake wheel for build toolchain ...")
-    _pip_install_watched(pip, ["cmake", "--only-binary=cmake", "--upgrade",
-                               "--no-cache-dir"])
-
-    # Build CMAKE_ARGS from cpu flags + optional Vulkan flag
-    flags: List[str] = list(cpu["cmake_flags"])
+# ---------------------------------------------------------------------------
+# Backend installation — compile from source
+# ---------------------------------------------------------------------------
+def compile_llama_cpp(cpu: Dict[str, Any], use_vulkan: bool) -> str:
+    build_root, using_temp = _get_build_root()
+    bin_dir    = _ROOT / LLAMA_BIN_DIR
+    build_root.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    
+    src_dir = build_root / "llama_cpp_src" / LLAMA_CPP_SOURCE_DIR
+    build_dir = build_root / "lc_bld"
+    
+    if not _git_clone(LLAMA_CPP_SOURCE_URL, src_dir, "b9670"):
+        _cleanup_build_temp(build_root, using_temp)
+        return "error: git clone failed"
+        
+    cmake_defs: List[str] = ["BUILD_SHARED_LIBS=OFF"]
+    
+    # Add CPU optimizations from central map (applies to BOTH CPU and Vulkan builds)
+    for feat in CPU_FEATURES:
+        if cpu.get(feat["key"]):
+            cmake_defs.append(feat["cmake"])
+            
     if use_vulkan:
-        flags.append("SD_VULKAN=ON")
-    cmake_args_str = " ".join(f"-D{f}" for f in flags)
-
-    env_patch: Dict[str, str] = {"FORCE_CMAKE": "1"}
-    if cmake_args_str:
-        env_patch["CMAKE_ARGS"] = cmake_args_str
-        log(f"  CMAKE_ARGS: {cmake_args_str}")
-
+        cmake_defs.append("GGML_VULKAN=ON")
+        
     mode = "Vulkan" if use_vulkan else "CPU"
-    log(f"  stable-diffusion-cpp-python: compiling from source ({mode}) ...")
+    log(f"  Compiling llama.cpp ({mode}) — this will take several minutes...")
+    jobs = max(1, cpu.get("default_threads", 4))
+    if not _run_cmake_build(src_dir, build_dir, cmake_defs, jobs):
+        _cleanup_build_temp(build_root, using_temp)
+        return f"error: cmake build failed ({mode})"
+        
+    # llama.cpp outputs llama-cli.exe — search fixed candidates then fall back
+    # to a recursive glob in case the layout shifts between releases.
+    candidates = [
+        build_dir / "bin" / "Release" / "llama-cli.exe",
+        build_dir / "bin" / "llama-cli.exe",
+        build_dir / "Release" / "llama-cli.exe",
+        build_dir / "llama-cli.exe",
+    ]
+    src_exe: Optional[Path] = next((c for c in candidates if c.exists()), None)
+    if src_exe is None:
+        found = list(build_dir.rglob("llama-cli.exe"))
+        src_exe = found[0] if found else None
 
-    old_env = os.environ.copy()
-    os.environ.update(env_patch)
-    try:
-        ok = _pip_install_watched(pip, [
-            SD_CPP_PACKAGE,
-            "--no-binary", "stable-diffusion-cpp-python",
-            "--no-cache-dir",
-            "--force-reinstall",
-        ], max_retries=BUILD_MAX_RETRIES, initial_delay=BUILD_RETRY_DELAY)
-    finally:
-        os.environ.clear()
-        os.environ.update(old_env)
+    if not src_exe:
+        log("  WARNING: llama-cli.exe not found in expected locations after build.")
+        log(f"  Searched under: {build_dir}")
+        _cleanup_build_temp(build_root, using_temp)
+        return "error: binary not found after build"
+        
+    dest_exe = bin_dir / "llama-cli.exe"
+    shutil.copy2(str(src_exe), str(dest_exe))
+    
+    for dll in src_exe.parent.glob("*.dll"):
+        shutil.copy2(str(dll), str(bin_dir / dll.name))
+        
+    log(f"  llama-cli.exe → {dest_exe}")
+    _cleanup_build_temp(build_root, using_temp)
+    return f"success (compiled {mode})"
 
-    return f"success (compiled {mode})" if ok else f"error: compile failed ({mode})"
+def compile_sd_cpp(cpu: Dict[str, Any], use_vulkan: bool) -> str:
+    build_root, using_temp = _get_build_root()
+    bin_dir    = _ROOT / SD_BIN_DIR
+    build_root.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    
+    src_dir = build_root / "sd_cpp_src" / SD_CPP_SOURCE_DIR
+    build_dir = build_root / "sd_bld"
+    
+    if not _git_clone(SD_CPP_SOURCE_URL, src_dir, "master"):
+        _cleanup_build_temp(build_root, using_temp)
+        return "error: git clone failed"
+        
+    cmake_defs: List[str] = ["BUILD_SHARED_LIBS=OFF", "SD_BUILD_EXAMPLES=ON"]
+    
+    # Add CPU optimizations from central map (applies to BOTH CPU and Vulkan builds)
+    for feat in CPU_FEATURES:
+        if cpu.get(feat["key"]):
+            cmake_defs.append(feat["cmake"])
+            
+    if use_vulkan:
+        cmake_defs.append("SD_VULKAN=ON")
+        
+    sdk = os.environ.get("VULKAN_SDK", "")
+    if sdk:
+        cmake_defs.append(f"Vulkan_INCLUDE_DIR={sdk}/Include")
+        cmake_defs.append(f"Vulkan_LIBRARY={sdk}/Lib/vulkan-1.lib")
+        
+    mode = "Vulkan" if use_vulkan else "CPU"
+    log(f"  Compiling stable-diffusion.cpp ({mode}) — this will take several minutes...")
+    jobs = max(1, cpu.get("default_threads", 4))
+    if not _run_cmake_build(src_dir, build_dir, cmake_defs, jobs):
+        _cleanup_build_temp(build_root, using_temp)
+        return f"error: cmake build failed ({mode})"
 
+    # stable-diffusion.cpp (post-refactor) outputs sd-cli.exe and sd-server.exe
+    # under bin/Release/. Search fixed candidates then fall back to rglob so the
+    # installer remains robust if the layout shifts between releases.
+    cli_candidates = [
+        build_dir / "bin" / "Release" / "sd-cli.exe",
+        build_dir / "bin" / "sd-cli.exe",
+        build_dir / "Release" / "sd-cli.exe",
+        build_dir / "examples" / "cli" / "Release" / "sd-cli.exe",
+        # legacy name kept as final fallback
+        build_dir / "bin" / "Release" / "sd.exe",
+        build_dir / "bin" / "sd.exe",
+        build_dir / "Release" / "sd.exe",
+        build_dir / "examples" / "cli" / "Release" / "sd.exe",
+        build_dir / "sd.exe",
+    ]
+    src_exe: Optional[Path] = next((c for c in cli_candidates if c.exists()), None)
+    if src_exe is None:
+        # Recursive search: prefer sd-cli.exe, fall back to sd.exe
+        for name in ("sd-cli.exe", "sd.exe"):
+            found = list(build_dir.rglob(name))
+            if found:
+                src_exe = found[0]
+                break
+
+    if not src_exe:
+        log("  WARNING: sd-cli.exe (or sd.exe) not found after build.")
+        log(f"  Searched under: {build_dir}")
+        _cleanup_build_temp(build_root, using_temp)
+        return "error: binary not found after build"
+
+    # Copy the CLI binary using its real name (preserve sd-cli.exe or sd.exe)
+    dest_exe = bin_dir / src_exe.name
+    shutil.copy2(str(src_exe), str(dest_exe))
+    log(f"  {src_exe.name} → {dest_exe}")
+
+    # Copy sd-server.exe if present alongside the CLI binary
+    srv_src = src_exe.parent / "sd-server.exe"
+    if srv_src.exists():
+        srv_dst = bin_dir / "sd-server.exe"
+        shutil.copy2(str(srv_src), str(srv_dst))
+        log(f"  sd-server.exe → {srv_dst}")
+
+    for dll in src_exe.parent.glob("*.dll"):
+        shutil.copy2(str(dll), str(bin_dir / dll.name))
+
+    _cleanup_build_temp(build_root, using_temp)
+    return f"success (compiled {mode})"
 
 # ---------------------------------------------------------------------------
 # Install menu helpers
 # ---------------------------------------------------------------------------
-
 def _detect_build_tools() -> Tuple[Optional[Path], Optional[Path]]:
-    """Return (git, cmake) for banner display. cmake needed for source builds."""
     return find_git(), find_cmake()
-
 
 def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     git, cmake = _detect_build_tools()
@@ -809,10 +791,12 @@ def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
           f" Python {platform.python_version()}")
     print(f"     Build Tools: Git {'OK' if git else 'NOT FOUND'};"
           f" CMake {'OK' if cmake else 'NOT FOUND'}")
-    print(f"     Architecture: AVX {cpu['has_avx']};"
-          f" AVX2 {cpu['has_avx2']};"
-          f" F16C {cpu['has_f16c']};"
-          f" FMA {cpu['has_fma']}")
+    
+    # Clean comma-separated list of detected architecture features from central map
+    arch_features = [feat["name"] for feat in CPU_FEATURES if cpu.get(feat["key"])]
+    arch_str = ", ".join(arch_features) if arch_features else "Baseline x86_64"
+    print(f"     Architecture: {arch_str}")
+    
     gpu_str = ", ".join(str(d["index"]) for d in vk["devices"]) if vk["devices"] else "none"
     print(f"     Hardware: CPUs {cpu['cores_logical']};"
           f" GPUs {gpu_str};"
@@ -820,7 +804,6 @@ def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     print()
     print()
     print("  " + "-" * 79)
-    print()
     print()
     print()
     print("     1. Clean Install (Purge First)")
@@ -833,13 +816,18 @@ def _print_install_banner(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
     print()
     print("  " + "=" * 79)
 
-
 def _purge_for_clean_install() -> None:
-    """Remove venv and build dirs so everything is rebuilt from scratch."""
     section("Purging previous installation...")
-    for target, label in ((_VENV_DIR, "venv"),):
+    targets = [
+        (_VENV_DIR,                        "venv"),
+        (_ROOT / LLAMA_BIN_DIR,            "llama_cpp_binaries"),
+        (_ROOT / SD_BIN_DIR,               "stable_diffusion_binaries"),
+        (_ROOT / "data" / "build",         "data/build"),
+        (_BUILD_TEMP_ROOT,                 "build_temp (C:\\build_temp\\igg)"),
+    ]
+    for target, label in targets:
         if target.exists():
-            log(f"Removing {label} at {target} ...")
+            log(f"Removing {label} at {target}...")
             if _safe_rmtree(target):
                 log(f"{label} removed.")
             else:
@@ -851,20 +839,16 @@ def _purge_for_clean_install() -> None:
         _PERSIST_PATH.unlink()
         log("persistent.json removed (will be regenerated).")
 
-
 def _run_deps(cpu: Dict[str, Any]) -> None:
-    """Create venv + install Python deps."""
     section("Python virtual environment...")
     if not create_venv():
         log("FATAL: could not create venv.")
         return
-
     section("Python dependencies...")
     if not install_deps():
         log("WARNING: some packages failed — the app may not work correctly.")
     else:
         log("All packages installed OK.")
-
 
 def _print_backend_banner(vk: Dict[str, Any]) -> None:
     vk_label = "detected" if vk["available"] else "not detected"
@@ -891,9 +875,7 @@ def _print_backend_banner(vk: Dict[str, Any]) -> None:
     print()
     print("  " + "=" * 79)
 
-
 def _choose_backend(vk: Dict[str, Any]) -> bool:
-    """Show backend menu, return True for Vulkan, False for CPU."""
     while True:
         _print_backend_banner(vk)
         choice = input("  Selection; Menu Options = 1-2, Abandon Install = A: ").strip().upper()
@@ -910,21 +892,16 @@ def _choose_backend(vk: Dict[str, Any]) -> bool:
         print("  Invalid selection, please try again.")
         print()
 
-
 def _run_build(cpu: Dict[str, Any], use_vulkan: bool) -> None:
-    """Install llama-cpp-python and stable-diffusion-cpp-python via pip."""
     mode = "Vulkan" if use_vulkan else "CPU"
-    section(f"Backend install  ({mode})  —  llama-cpp-python + stable-diffusion-cpp-python...")
-
-    log("llama-cpp-python ...")
-    llama_status = install_llama_cpp_python(cpu, use_vulkan)
-    log(f"  llama-cpp-python  →  {llama_status}")
-
+    section(f"Backend compile  ({mode})  —  llama.cpp + stable-diffusion.cpp...")
+    log("llama.cpp...")
+    llama_status = compile_llama_cpp(cpu, use_vulkan)
+    log(f"  llama.cpp  →  {llama_status}")
     log()
-    log("stable-diffusion-cpp-python ...")
-    sd_status = install_sd_cpp_python(cpu, use_vulkan)
-    log(f"  stable-diffusion-cpp-python  →  {sd_status}")
-
+    log("stable-diffusion.cpp...")
+    sd_status = compile_sd_cpp(cpu, use_vulkan)
+    log(f"  stable-diffusion.cpp  →  {sd_status}")
 
 def _run_summary(t0: float) -> None:
     elapsed = round(time.time() - t0, 1)
@@ -933,24 +910,28 @@ def _run_summary(t0: float) -> None:
     log(f"constants.ini: {_CONST_PATH}")
     log(f"persistent   : {_PERSIST_PATH}")
     log(f"venv         : {_VENV_DIR}")
+    log(f"llama bins   : {_ROOT / LLAMA_BIN_DIR}")
+    log(f"sd bins      : {_ROOT / SD_BIN_DIR}")
     log()
     log("Press Enter to return to the batch menu...")
     input()
 
-
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
-
 def run_detection() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     section("Hardware detection...")
     cpu = detect_cpu()
     vk  = detect_vulkan()
-
     log(f"CPU  : {cpu['brand']}")
     log(f"Arch : {cpu['arch']}  Vendor: {cpu['vendor']}")
     log(f"Cores: {cpu['cores_logical']} logical  →  {cpu['default_threads']} threads (85%)")
-    log(f"AVX  : {cpu['has_avx']}  AVX2: {cpu['has_avx2']}  F16C: {cpu['has_f16c']}  FMA: {cpu['has_fma']}")
+    
+    # Clean comma-separated list for detection log from central map
+    arch_features = [feat["name"] for feat in CPU_FEATURES if cpu.get(feat["key"])]
+    arch_str = ", ".join(arch_features) if arch_features else "Baseline x86_64"
+    log(f"Features: {arch_str}")
+    
     log()
     log(f"Vulkan : {vk['available']}  ver={vk['version']}")
     log(f"SDK    : {vk['sdk'] or 'not set'}")
@@ -962,26 +943,23 @@ def run_detection() -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log("GPUs   : none detected via vulkaninfo")
     return cpu, vk
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Image Generator GGUF Installer")
-    parser.add_argument("--detect-only",  action="store_true",
-                        help="Detect hardware and write constants.ini only")
-    parser.add_argument("--deps-only",    action="store_true",
-                        help="Create venv and install Python packages only")
-    parser.add_argument("--build-only",   action="store_true",
-                        help="Build llama.cpp and sd.cpp only")
+    parser.add_argument("--detect-only",  action="store_true", help="Detect hardware and write constants.ini only")
+    parser.add_argument("--deps-only",    action="store_true", help="Create venv and install Python packages only")
+    parser.add_argument("--build-only",   action="store_true", help="Build llama.cpp and sd.cpp only")
     args = parser.parse_args()
-
+    
     ensure_dirs()
     header("Image-Generator-Gguf — Initialize Install")
+    
     if args.detect_only:
         cpu, vk = run_detection()
         write_constants(cpu, vk)
         write_default_persistent(cpu)
         log("Detection complete.")
         return
-
+        
     if args.deps_only:
         cpu, vk = run_detection()
         write_constants(cpu, vk)
@@ -990,7 +968,7 @@ def main() -> None:
         _run_deps(cpu)
         _run_summary(t0)
         return
-
+        
     if args.build_only:
         cpu, vk = run_detection()
         write_constants(cpu, vk)
@@ -999,20 +977,17 @@ def main() -> None:
         _run_build(cpu, use_vulkan)
         _run_summary(t0)
         return
-
+        
     # Interactive menu
     cpu, vk = run_detection()
-
     while True:
         _print_install_banner(cpu, vk)
         choice = input("  Selection; Menu Options = 1-3, Abandon Install = A: ").strip().upper()
-
         if choice == "A":
             print()
             print("  Abandoning install — returning to batch menu.")
             print()
             return
-
         if choice == "1":
             t0 = time.time()
             use_vulkan = _choose_backend(vk)
@@ -1024,7 +999,6 @@ def main() -> None:
             _run_build(cpu, use_vulkan)
             _run_summary(t0)
             return
-
         if choice == "2":
             t0 = time.time()
             use_vulkan = _choose_backend(vk)
@@ -1035,7 +1009,6 @@ def main() -> None:
             _run_build(cpu, use_vulkan)
             _run_summary(t0)
             return
-
         if choice == "3":
             t0 = time.time()
             section("Refreshing configs...")
@@ -1046,12 +1019,10 @@ def main() -> None:
             write_default_persistent(cpu)
             _run_summary(t0)
             return
-
-        # Invalid input — redisplay menu
+            
         print()
         print("  Invalid selection, please try again.")
         print()
-
 
 if __name__ == "__main__":
     main()
