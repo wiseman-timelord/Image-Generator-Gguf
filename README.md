@@ -5,7 +5,7 @@ Status: Development/Alpha
 A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. The program WiseMan-TimeLord probably should have done before doing other image based llm applications WiseMan-TimeLord have produced, this will be a simple image generation project, but eventually cover several encoders and image generation models.
 
 ### Media
-- Program starts with hidden errors...
+- Program starts with hidden errors (~A005)...
 ```
 
   Starting application at http://127.0.0.1:7860
@@ -85,7 +85,7 @@ Environment:
   warnings.warn(
 
 ```
-- Installer is looking nice now...
+- Installer is looking nice now (~A003)...
 ```
   ==============================================================================
       Image-Generator-Gguf — Install Method
