@@ -1,5 +1,5 @@
 ![image missing](https://raw.githubusercontent.com/wiseman-timelord/Image-Generator-Gguf/refs/heads/main/media/banner_llama.jpg)
-# Image-Generator-Gguf
+# Image-Gradio-Gguf
 Status: Development/Alpha
 
 ### Description
