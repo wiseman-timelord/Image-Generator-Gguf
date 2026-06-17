@@ -85,7 +85,7 @@ Environment:
   warnings.warn(
 
 ```
-- Installer script has some cool features such as route for Check/Reinstall, incase install fails (A007)...
+- Installer script has Check/Reinstall, incase issues during install (A007)...
 ```
 (...)
 
