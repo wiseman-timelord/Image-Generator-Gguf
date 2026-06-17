@@ -5,7 +5,7 @@ Status: Development/Alpha
 A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. The program WiseMan-TimeLord probably should have done before doing other image based llm applications WiseMan-TimeLord have produced, this will be a simple image generation project, but eventually cover several encoders and image generation models.
 
 ### Media
-- Program starts with hidden errors (~A005)...
+- Program starts something like this (A005)...
 ```
 
   Starting application at http://127.0.0.1:7860
@@ -33,57 +33,6 @@ C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\scripts\display.py:
   with gr.Blocks(title="Image Generator GGUF",
 * Running on local URL:  http://127.0.0.1:7860
 * To create a public link, set `share=True` in `launch()`.
-C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\venv\Lib\site-packages\gradio\routes.py:1379: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
-  return await queue_join_helper(body, request, username)
-C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\venv\Lib\site-packages\gradio\blocks.py:1938: UserWarning: A function (_collect_debug) returned too many output values (needed: 0, returned: 1). Ignoring extra values.
-    Output components:
-        []
-    Output values returned:
-        ["========================================================================
-  DEBUG REPORT  2026-06-17 09:26:52
-========================================================================
-
-Python  : 3.12.4
-Gradio  : 6.18.0
-Platform: Windows-10-10.0.19045-SP0
-
-CPU     : AMD Ryzen 9 3900X 12-Core Processor  [AMD]  24 threads
-Default : 21 threads (85%)
-AVX2:True  F16C:True  FMA:True  AVX512:False  AOCL:False
-
-RAM     : 13205 / 65460 MB  (20%)
-
-Vulkan  : True  ver=1.4.341
-SDK     : C:\Program Files\VulkanSDK\1.4.341.1
-  GPU0: NVIDIA GeForce GTX 1060 3GB
-  GPU1: Radeon (TM) RX 470 Graphics
-
-llama.cpp : built  C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\llama_cpp_binaries\llama-cli.exe
-sd.cpp    : built  C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\stable_diffusion_binaries\sd-cli.exe
-
-llama-cli : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\llama_cpp_binaries\llama-cli.exe
-sd exe    : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\stable_diffusion_binaries\sd-cli.exe
-
-Encoder  : NOT SET
-Diffusion: NOT SET
-VAE      : NOT SET
-
-Enc backend : CPU
-Img backend : CPU
-Enc threads : 21
-Img threads : 21
-Size        : 512×512
-Steps       : 4  CFG: 1.0  Sampler: euler_a
-
-Environment:
-  NUMBER_OF_PROCESSORS = 24
-  PATH = C:\Windows\System32;C:\Windows\System32\Wbem;C:\Network_Files\4allDownloader&Converter\bin;C:\Program Files\Python311\Scripts\;C:\Program Files\Python311\;C:\Program Files\VulkanSDK\1.4.341.1\Bin;C:\P...
-  PROCESSOR_ARCHITECTURE = AMD64
-  VULKAN_SDK = C:\Program Files\VulkanSDK\1.4.341.1
-
-========================================================================"]
-  warnings.warn(
-
 ```
 - Installer script has Check/Reinstall, incase issues during install (A007)...
 ```
