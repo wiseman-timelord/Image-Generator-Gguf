@@ -175,6 +175,19 @@ def get_vulkan_info() -> Dict[str, Any]:
     }
 
 
+def get_install_type() -> str:
+    """Return 'vulkan' or 'cpu_only' from constants.ini [general] section.
+    Falls back to 'vulkan' when the key is absent (pre-existing installs that
+    have Vulkan available should keep full GPU options).
+    """
+    cfg = _read_constants()
+    if cfg.has_section("general"):
+        return cfg["general"].get("install_type", "vulkan").strip().lower()
+    # Legacy installs without [general]: infer from vulkan availability.
+    vk = cfg["vulkan"] if cfg.has_section("vulkan") else {}
+    return "vulkan" if vk.get("available", "False") == "True" else "cpu_only"
+
+
 def get_backend_choices() -> Dict[str, List[str]]:
     """
     Build the dropdown choices for encoder/imagegen backends.
@@ -182,17 +195,21 @@ def get_backend_choices() -> Dict[str, List[str]]:
     Returns {"cpu_choices": [...], "gpu_choices": [...], "all_choices": [...]}
     where each choice is a string the UI shows and inference.py uses.
 
-    CPU entry  : "CPU"
+    CPU entry  : "<CPU brand name>"  (e.g. "AMD Ryzen 9 3900X 12-Core Processor")
     GPU entries: "Vulkan GPU 0 — RX 580", "Vulkan GPU 1 — RX 470", ...
+    GPU entries are omitted entirely for a cpu_only install.
     """
-    cpu_choices = ["CPU"]
+    cpu_info = get_cpu_info()
+    cpu_label = cpu_info.get("brand", "CPU") or "CPU"
+    cpu_choices = [cpu_label]
     gpu_choices: List[str] = []
 
-    vk = get_vulkan_info()
-    if vk["available"]:
-        for d in vk["devices"]:
-            label = f"Vulkan GPU {d['index']} — {d['name']}"
-            gpu_choices.append(label)
+    if get_install_type() != "cpu_only":
+        vk = get_vulkan_info()
+        if vk["available"]:
+            for d in vk["devices"]:
+                label = f"Vulkan GPU {d['index']} — {d['name']}"
+                gpu_choices.append(label)
 
     all_choices = cpu_choices + gpu_choices
     return {
@@ -216,7 +233,7 @@ def parse_backend_choice(choice: str) -> Dict[str, Any]:
 
     Returns {"use_vulkan": bool, "vulkan_device": int}
     e.g. "Vulkan GPU 1 — RX 470" → {"use_vulkan": True, "vulkan_device": 1}
-         "CPU"                    → {"use_vulkan": False, "vulkan_device": -1}
+         "AMD Ryzen 9 3900X ..."  → {"use_vulkan": False, "vulkan_device": -1}
     """
     if choice.startswith("Vulkan GPU"):
         # "Vulkan GPU 1 — name"
@@ -235,12 +252,13 @@ def parse_backend_choice(choice: str) -> Dict[str, Any]:
 
 def _default_persistent() -> Dict[str, Any]:
     dt = get_default_threads()
+    cpu_label = get_cpu_info().get("brand", "CPU") or "CPU"
     return {
         "encoder_model_path": "", "encoder_model_name": "",
         "imagegen_model_path": "", "imagegen_model_name": "",
         "vae_model_path": "", "vae_model_name": "",
-        "backend_encoder": "CPU",
-        "backend_imagegen": "CPU",
+        "backend_encoder": cpu_label,
+        "backend_imagegen": cpu_label,
         "encoder_threads": dt,
         "encoder_batch_size": 512,
         "encoder_ctx_size": 4096,

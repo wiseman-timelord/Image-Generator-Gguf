@@ -59,11 +59,15 @@ def _backend_choices() -> List[str]:
 def _default_backend_value(key: str) -> str:
     """
     Load the saved backend string; if it's no longer in the current
-    choices list (e.g. GPU was removed), fall back to CPU.
+    choices list (e.g. GPU was removed, or this is a fresh install with
+    a newly-branded CPU label), fall back to the CPU entry.
     """
-    saved = _cfg().get(key, "CPU")
+    saved = _cfg().get(key, "")
     choices = _backend_choices()
-    return saved if saved in choices else "CPU"
+    if saved in choices:
+        return saved
+    # First entry is always the CPU label
+    return choices[0] if choices else "CPU"
 
 
 def _thread_choices() -> List[int]:
@@ -295,23 +299,33 @@ def _build_config_tab_inner() -> None:
                 _cfg_w["vae_scan_btn"]   = gr.Button("Scan models/", size="sm")
 
     # ── Backend selection ──
+    is_cpu_only = configure.get_install_type() == "cpu_only"
+
     gr.Markdown("### Backend Selection")
-    gr.Markdown(
-        "Choices are populated from `data/constants.ini` written during installation. "
-        "CPU = run on processor. Vulkan GPU N = run on that GPU."
-    )
+    if is_cpu_only:
+        gr.Markdown(
+            "**CPU-only install** — GPU options are not available. "
+            "Re-run the installer and choose the Vulkan route to enable GPU backends."
+        )
+    else:
+        gr.Markdown(
+            "Choices are populated from `data/constants.ini` written during installation. "
+            "CPU = run on processor. Vulkan GPU N = run on that GPU."
+        )
     with gr.Row():
         _cfg_w["enc_backend_dd"] = gr.Dropdown(
             label="Encoder Backend",
             choices=choices,
             value=_default_backend_value("backend_encoder"),
             info="Where to run the LLM prompt encoder.",
+            interactive=not is_cpu_only,
         )
         _cfg_w["img_backend_dd"] = gr.Dropdown(
             label="ImageGen Backend",
             choices=choices,
             value=_default_backend_value("backend_imagegen"),
             info="Where to run image diffusion.",
+            interactive=not is_cpu_only,
         )
 
     # ── Encoder (LLM) settings ──
@@ -331,8 +345,10 @@ def _build_config_tab_inner() -> None:
                                  value=cfg.get("encoder_ctx_size", 4096))
         _cfg_w["enc_ngl_dd"] = gr.Dropdown(label="GPU Layers (-1 = all)",
                                  choices=configure.GPU_LAYER_CHOICES,
-                                 value=cfg.get("encoder_gpu_layers", -1),
-                                 info="Layers to offload to GPU. Ignored for CPU backend.")
+                                 value=0 if is_cpu_only else cfg.get("encoder_gpu_layers", -1),
+                                 info="Layers to offload to GPU. Not applicable for CPU-only install." if is_cpu_only else "Layers to offload to GPU. Ignored for CPU backend.",
+                                 interactive=not is_cpu_only,
+                                 )
     _cfg_w["enc_flash_chk"] = gr.Checkbox(
         label="Flash Attention",
         value=cfg.get("encoder_flash_attn", True),
@@ -593,7 +609,7 @@ def build_app() -> gr.Blocks:
         # ── Unified bottom bar (spans below all tabs) ─────────────────────────
         gr.HTML("""
 <style>
-  #bottom-bar { margin-top: 0.75rem; border-top: 2px solid var(--border-color-primary); padding-top: 0.5rem; align-items: stretch; }
+  #bottom-bar { margin-top: 0.75rem; padding-top: 0.5rem; align-items: stretch; }
   #exit-btn { min-height: 3.5rem !important; background: #a93226 !important; border-color: #922b21 !important; color: #fff !important; font-weight: 700 !important; font-size: 1rem !important; }
   #exit-btn:hover { background: #c0392b !important; }
 </style>

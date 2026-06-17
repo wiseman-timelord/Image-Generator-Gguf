@@ -404,10 +404,16 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
     output_name = f"img_{int(time.time())}_s{seed}.{fmt}"
     output_path = output_dir / output_name
 
-    # Build sd command
+    # Build sd command.
+    # --diffusion-model for standalone gguf diffusion weights (not -m).
+    # Z-Image-Turbo is S3-DiT architecture: it requires --llm pointing at
+    # the Qwen3 encoder gguf. Without it sd.cpp cannot find the conditioner
+    # tensors (text_encoders.llm.*) and fails at model metadata validation.
+    enc_path = cfg.get("encoder_model_path", "")
     args = [
         str(sd_cli),
-        "-m", str(diff_path), "--vae", str(vae_path),
+        "--diffusion-model", str(diff_path),
+        "--vae", str(vae_path),
         "-p", enhanced, "-o", str(output_path),
         "-H", str(int(cfg.get("imagegen_height", 512))),
         "-W", str(int(cfg.get("imagegen_width", 512))),
@@ -420,6 +426,11 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
         "-t", str(int(cfg.get("imagegen_threads", configure.get_default_threads()))),
     ]
 
+    # Pass the Qwen3 encoder as the LLM text encoder for Z-Image-Turbo.
+    # This is mandatory — the diffusion gguf has no bundled text encoder.
+    if enc_path and Path(enc_path).exists():
+        args.extend(["--llm", enc_path])
+
     neg = cfg.get("negative_prompt", "")
     if neg:
         args.extend(["-n", neg])
@@ -427,8 +438,10 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
     backend = cfg.get("backend_imagegen", "CPU")
     env = os.environ.copy()
     if "Vulkan" in backend:
-        args.append("--vulkan")
-        env["GGML_VULKAN_DEVICE"] = str(cfg.get("vulkan_device", 1))
+        vk_dev = cfg.get("vulkan_device", 1)
+        # --backend replaces --vulkan in current sd.cpp builds.
+        # Format: --backend vulkan{N}  (e.g. --backend vulkan1)
+        args.extend(["--backend", f"vulkan{vk_dev}"])
         sdk = utilities.detect_vulkan().get("vulkan_sdk", "")
         if sdk:
             env["PATH"] = str(Path(sdk) / "Bin") + ";" + env.get("PATH", "")
@@ -437,8 +450,13 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
     if batch > 1:
         args.extend(["-b", str(batch)])
 
+    # --clip-skip is only valid for SD1.x / SD2.x architectures.
+    # Flux-based models (z_image_turbo) do not use CLIP skip — omit it.
+    diff_name = Path(str(diff_path)).name.lower()
+    is_sd_classic = not any(k in diff_name for k in
+                            ("flux", "z_image", "sd3", "wan", "ltx"))
     clip_skip = int(cfg.get("imagegen_clip_skip", 2))
-    if clip_skip > 1:
+    if clip_skip > 1 and is_sd_classic:
         args.extend(["--clip-skip", str(clip_skip)])
 
     if progress_callback:
@@ -477,17 +495,27 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
             if progress_callback:
                 progress_callback(f"Done: {output_name}", 1.0)
         else:
-            tail = "".join(output_lines[-30:])[-2000:]
-            result["message"] = (f"Generation failed (exit "
-                                 f"{process.returncode}).\n{tail}")
+            # Full subprocess output -> terminal (Windows console) only.
+            full_output = "".join(output_lines)
+            print(
+                f"\n--- sd.cpp output (exit {process.returncode}) ---\n"
+                f"{full_output}"
+                f"--- end sd.cpp output ---\n", flush=True)
+            result["message"] = (
+                f"Generation failed (exit {process.returncode}). "
+                f"See terminal for details."
+            )
             result["elapsed_seconds"] = round(time.time() - t0, 2)
 
     except subprocess.TimeoutExpired:
         process.kill()
-        result["message"] = "Generation timed out."
+        print("\n--- sd.cpp timed out after 600 s ---\n", flush=True)
+        result["message"] = "Generation timed out (600 s). See terminal."
         result["elapsed_seconds"] = round(time.time() - t0, 2)
     except Exception as e:
-        result["message"] = f"Error: {e}\n{traceback.format_exc()}"
+        print(f"\n--- generate_image exception ---\n{traceback.format_exc()}"
+              f"--- end traceback ---\n", flush=True)
+        result["message"] = f"Error: {e}. See terminal for traceback."
         result["elapsed_seconds"] = round(time.time() - t0, 2)
 
     return result

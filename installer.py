@@ -66,6 +66,10 @@ CPU_FEATURES = [
 # ---------------------------------------------------------------------------
 # Backend source build constants
 # ---------------------------------------------------------------------------
+GIT_CLONE_RETRIES = 3
+GIT_CLONE_TIMEOUT = 900
+GIT_RETRY_DELAYS = [5, 10, 15]  # seconds between attempts
+
 LLAMA_CPP_SOURCE_URL = "https://github.com/ggml-org/llama.cpp.git"
 LLAMA_CPP_SOURCE_DIR = "lc_src"   # Short name keeps paths under MAX_PATH for MSBuild FileTracker
 
@@ -308,12 +312,20 @@ def _parse_vk_version(stdout: str) -> str:
 # ---------------------------------------------------------------------------
 # Write constants.ini
 # ---------------------------------------------------------------------------
-def write_constants(cpu: Dict[str, Any], vk: Dict[str, Any]) -> None:
+def write_constants(cpu: Dict[str, Any], vk: Dict[str, Any],
+                    use_vulkan: Optional[bool] = None) -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     cfg = configparser.ConfigParser()
     if _CONST_PATH.exists():
         cfg.read(_CONST_PATH, encoding="utf-8")
-        
+
+    # [general] — only written when an install route is explicitly chosen.
+    # Detection-only calls pass use_vulkan=None and leave any existing value.
+    if use_vulkan is not None:
+        if not cfg.has_section("general"):
+            cfg.add_section("general")
+        cfg["general"]["install_type"] = "vulkan" if use_vulkan else "cpu_only"
+
     if not cfg.has_section("cpu"):
         cfg.add_section("cpu")
     cfg["cpu"]["brand"]           = cpu["brand"]
@@ -533,53 +545,114 @@ def _cleanup_build_temp(build_root: Path, using_temp: bool) -> None:
         log("  You may delete it manually.")
 
 # ---------------------------------------------------------------------------
-# Git clone helper (Replaces unreliable urllib zip downloads)
+# Git clone helper with resume capability
 # ---------------------------------------------------------------------------
-def _git_clone(repo_url: str, dest_dir: Path, ref: str) -> bool:
+def _git_clone(repo_url: str, dest_dir: Path, ref: str, retries: int = GIT_CLONE_RETRIES) -> bool:
+    """Clone or resume a git repository with retries."""
     git_exe = find_git()
     if git_exe is None:
         log("  ERROR: git not found. Cannot clone repository.")
         return False
-    
-    if dest_dir.exists():
-        if (dest_dir / ".git").exists():
-            log(f"  Source directory already exists at {dest_dir}, skipping clone.")
-            return True
-        else:
-            log(f"  Directory {dest_dir} exists but is not a git repo. Removing and recloning...")
-            _safe_rmtree(dest_dir)
 
-    repo_name = repo_url.split('/')[-1].replace('.git', '')
-    log(f"  Cloning {repo_name} (ref: {ref}) with submodules...")
-    
+    # Set global postBuffer to 500 MB to avoid early EOF errors
     try:
-        subprocess.run([str(git_exe), "config", "--global", "core.longpaths", "true"], 
-                       capture_output=True, check=False)
+        subprocess.run(
+            [str(git_exe), "config", "--global", "http.postBuffer", "524288000"],
+            capture_output=True, check=False, timeout=10
+        )
     except Exception:
         pass
 
-    cmd = [
-        str(git_exe), "clone", 
-        "--depth", "1", 
-        "--recurse-submodules", 
-        "--branch", ref, 
-        repo_url, 
-        str(dest_dir)
-    ]
-    try:
-        proc = subprocess.run(cmd, capture_output=False, text=True, timeout=600)
-        if proc.returncode == 0:
-            log("  Clone complete.")
-            return True
-        else:
-            log(f"  ERROR cloning (exit code {proc.returncode}).")
+    repo_name = repo_url.split('/')[-1].replace('.git', '')
+
+    for attempt in range(1, retries + 1):
+        log(f"  Cloning {repo_name} (ref: {ref}) — attempt {attempt}/{retries}")
+
+        # Check if we have an existing repo that we can resume
+        if dest_dir.exists() and (dest_dir / ".git").is_dir():
+            log(f"    Found existing repository at {dest_dir}, attempting to resume...")
+            try:
+                # Fetch all updates (including the ref we need)
+                fetch_cmd = [str(git_exe), "-C", str(dest_dir), "fetch", "--all", "--prune"]
+                subprocess.run(fetch_cmd, check=True, timeout=GIT_CLONE_TIMEOUT, capture_output=False)
+                
+                # Checkout the requested ref (branch or tag)
+                checkout_cmd = [str(git_exe), "-C", str(dest_dir), "checkout", ref]
+                # If ref is a tag, we might need to fetch it explicitly; but fetch --all should get it.
+                # Force checkout to discard local changes
+                subprocess.run(checkout_cmd, check=True, timeout=60, capture_output=False)
+                
+                # Verify we have the correct commit
+                verify_cmd = [str(git_exe), "-C", str(dest_dir), "rev-parse", "HEAD"]
+                verify_proc = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=10)
+                if verify_proc.returncode == 0:
+                    log("  Repository updated and verified.")
+                    return True
+                else:
+                    log("  Repository verification failed after resume.")
+                    # Fall through to fresh clone
+            except subprocess.CalledProcessError as e:
+                log(f"  Resume failed (exit {e.returncode}), will try fresh clone.")
+            except Exception as e:
+                log(f"  Resume failed: {e}, will try fresh clone.")
+            # If resume fails, we will proceed to fresh clone below.
+            # Remove the broken directory before fresh clone.
+            log(f"    Removing existing directory for fresh clone: {dest_dir}")
+            _safe_rmtree(dest_dir)
+
+        # Fresh clone
+        log(f"    Cloning fresh from {repo_url}...")
+        cmd = [
+            str(git_exe), "clone",
+            "--depth", "1",
+            "--single-branch",
+            "--branch", ref,
+            "--recurse-submodules",
+            "--shallow-submodules",
+            repo_url,
+            str(dest_dir)
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=False,
+                text=True,
+                timeout=GIT_CLONE_TIMEOUT
+            )
+            if proc.returncode == 0:
+                # Verify
+                verify_cmd = [str(git_exe), "-C", str(dest_dir), "rev-parse", "HEAD"]
+                verify_proc = subprocess.run(
+                    verify_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if verify_proc.returncode == 0:
+                    log("  Clone complete and verified.")
+                    return True
+                else:
+                    log("  Clone succeeded but repository verification failed.")
+                    # Treat as failure and retry
+            else:
+                log(f"  ERROR cloning (exit code {proc.returncode}).")
+        except subprocess.TimeoutExpired:
+            log("  ERROR: git clone timed out.")
+        except Exception as e:
+            log(f"  ERROR cloning: {e}")
+
+        # If this was the last attempt, give up
+        if attempt == retries:
+            log(f"  All {retries} attempts failed.")
             return False
-    except subprocess.TimeoutExpired:
-        log("  ERROR: git clone timed out.")
-        return False
-    except Exception as e:
-        log(f"  ERROR cloning: {e}")
-        return False
+
+        # Wait before next retry
+        delay = GIT_RETRY_DELAYS[min(attempt - 1, len(GIT_RETRY_DELAYS) - 1)]
+        log(f"  Retrying in {delay} seconds...")
+        time.sleep(delay)
+
+    return False
 
 def _run_cmake_build(source_dir: Path, build_dir: Path,
                      cmake_defs: List[str], jobs: int) -> bool:
@@ -634,10 +707,19 @@ def _run_cmake_build(source_dir: Path, build_dir: Path,
 # Backend installation — compile from source
 # ---------------------------------------------------------------------------
 def compile_llama_cpp(cpu: Dict[str, Any], use_vulkan: bool) -> str:
-    build_root, using_temp = _get_build_root()
-    bin_dir    = _ROOT / LLAMA_BIN_DIR
-    build_root.mkdir(parents=True, exist_ok=True)
+    bin_dir = _ROOT / LLAMA_BIN_DIR
     bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # If the binary already exists, skip cloning and building entirely.
+    if (bin_dir / "llama-cli.exe").exists():
+        log("  llama-cli.exe already present, skipping clone and build.")
+        return "success (binary already present)"
+
+    # Binary missing – log and proceed with clone/build.
+    log("  llama-cli.exe not present, cloning and building...")
+
+    build_root, using_temp = _get_build_root()
+    build_root.mkdir(parents=True, exist_ok=True)
     
     src_dir = build_root / "llama_cpp_src" / LLAMA_CPP_SOURCE_DIR
     build_dir = build_root / "lc_bld"
@@ -693,10 +775,20 @@ def compile_llama_cpp(cpu: Dict[str, Any], use_vulkan: bool) -> str:
     return f"success (compiled {mode})"
 
 def compile_sd_cpp(cpu: Dict[str, Any], use_vulkan: bool) -> str:
-    build_root, using_temp = _get_build_root()
-    bin_dir    = _ROOT / SD_BIN_DIR
-    build_root.mkdir(parents=True, exist_ok=True)
+    bin_dir = _ROOT / SD_BIN_DIR
     bin_dir.mkdir(parents=True, exist_ok=True)
+
+    # If the binary already exists, skip cloning and building entirely.
+    # Check for either sd-cli.exe or legacy sd.exe.
+    if (bin_dir / "sd-cli.exe").exists() or (bin_dir / "sd.exe").exists():
+        log("  sd-cli.exe (or sd.exe) already present, skipping clone and build.")
+        return "success (binary already present)"
+
+    # Binary missing – log and proceed with clone/build.
+    log("  sd.exe not present, cloning and building...")
+
+    build_root, using_temp = _get_build_root()
+    build_root.mkdir(parents=True, exist_ok=True)
     
     src_dir = build_root / "sd_cpp_src" / SD_CPP_SOURCE_DIR
     build_dir = build_root / "sd_bld"
@@ -971,9 +1063,9 @@ def main() -> None:
         
     if args.build_only:
         cpu, vk = run_detection()
-        write_constants(cpu, vk)
         t0 = time.time()
         use_vulkan = _choose_backend(vk)
+        write_constants(cpu, vk, use_vulkan=use_vulkan)
         _run_build(cpu, use_vulkan)
         _run_summary(t0)
         return
@@ -993,7 +1085,7 @@ def main() -> None:
             use_vulkan = _choose_backend(vk)
             header("Image-Generator-Gguf — Installation")
             _purge_for_clean_install()
-            write_constants(cpu, vk)
+            write_constants(cpu, vk, use_vulkan=use_vulkan)
             write_default_persistent(cpu)
             _run_deps(cpu)
             _run_build(cpu, use_vulkan)
@@ -1003,7 +1095,7 @@ def main() -> None:
             t0 = time.time()
             use_vulkan = _choose_backend(vk)
             header("Image-Generator-Gguf — Installation")
-            write_constants(cpu, vk)
+            write_constants(cpu, vk, use_vulkan=use_vulkan)
             write_default_persistent(cpu)
             _run_deps(cpu)
             _run_build(cpu, use_vulkan)
