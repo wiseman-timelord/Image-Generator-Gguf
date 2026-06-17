@@ -85,7 +85,7 @@ Environment:
   warnings.warn(
 
 ```
-- Installer script has clever features such as route for Check/Reinstall, which can be a time-saver if you are on wireless broadband (A007)...
+- Installer script has some cool features such as route for Check/Reinstall, incase install fails (A007)...
 ```
 (...)
 
