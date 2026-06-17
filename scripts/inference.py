@@ -40,17 +40,21 @@ GGUF_TYPES = {
 
 def find_sd_cpp() -> Optional[Path]:
     """
-    Find sd.exe.  Search order:
-      1. ./data/stable_diffusion_binaries/sd.exe  (compiled by installer)
-      2. PATH
+    Find the stable-diffusion.cpp CLI binary.  Search order:
+      1. ./data/stable_diffusion_binaries/sd-cli.exe  (current installer output)
+      2. ./data/stable_diffusion_binaries/sd.exe       (legacy fallback)
+      3. PATH
     """
     bin_dir = configure.get_sd_bin_dir()
-    for name in ("sd.exe", "sd"):
+    for name in ("sd-cli.exe", "sd-cli", "sd.exe", "sd"):
         p = bin_dir / name
         if p.exists():
             return p
-    found = shutil.which("sd")
-    return Path(found) if found else None
+    for name in ("sd-cli", "sd"):
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+    return None
 
 
 def find_llama_cli() -> Optional[Path]:

@@ -526,7 +526,7 @@ def _copy_to_clipboard(text: str) -> str:
         return f"Copy failed: {e}"
 
 
-def _build_debug_tab() -> None:
+def _build_debug_tab() -> gr.Textbox:
     gr.Markdown("## Debug / System Info")
     gr.Markdown(
         "Live system info sourced from `constants.ini` and runtime state. "
@@ -545,6 +545,7 @@ def _build_debug_tab() -> None:
 
     refresh_btn.click(_collect_debug, outputs=info_text)
     copy_btn.click(_copy_to_clipboard, inputs=info_text, outputs=copy_status)
+    return info_text   # <-- required for app.load wiring
 
 
 # ---------------------------------------------------------------------------
@@ -552,11 +553,11 @@ def _build_debug_tab() -> None:
 # ---------------------------------------------------------------------------
 
 def build_app() -> gr.Blocks:
-    """Assemble and return the Gradio 5 application."""
+    """Assemble and return the Gradio application."""
     configure.ensure_data_dirs()
 
-    with gr.Blocks(title="Image Generator GGUF",
-                   theme=gr.themes.Soft()) as app:
+    # Theme removed from Blocks constructor (moved to launch() in launcher.py)
+    with gr.Blocks(title="Image Generator GGUF") as app:   # <-- theme=... removed
         gr.Markdown("# Image Generator GGUF")
         gr.Markdown(
             "Local image generation using GGUF diffusion models "
@@ -571,9 +572,9 @@ def build_app() -> gr.Blocks:
                 _build_config_tab()
 
             with gr.TabItem("Debug / Info"):
-                _build_debug_tab()
+                info_text = _build_debug_tab()   # capture the returned textbox
 
-        # Auto-load debug info when app starts
-        app.load(_collect_debug, outputs=None)
+        # Load debug info into that textbox on startup – no more "too many outputs" warning
+        app.load(_collect_debug, outputs=info_text)
 
     return app

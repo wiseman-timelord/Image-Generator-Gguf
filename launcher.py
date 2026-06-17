@@ -62,19 +62,26 @@ def _print_banner() -> None:
     print(f"  VAE      : {'OK — ' + vae   if vae  and Path(vae).exists()  else 'NOT SET'}")
     print()
 
-
 def main() -> None:
     configure.ensure_data_dirs()
     _print_banner()
     app = display.build_app()
+
+    # Suppress the Starlette deprecation warning from Gradio internals
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        message=".*HTTP_422_UNPROCESSABLE_ENTITY.*"
+    )
+
     app.launch(
         server_name="127.0.0.1",
         server_port=7860,
         share=False,
         inbrowser=True,
         show_error=True,
+        theme=gr.themes.Soft(),
     )
-
 
 if __name__ == "__main__":
     main()

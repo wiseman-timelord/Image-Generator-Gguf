@@ -268,7 +268,7 @@ def get_memory_info() -> Dict[str, Any]:
 # The installer compiles llama.cpp and stable-diffusion.cpp from source and
 # places the executables in:
 #   ./data/llama_cpp_binaries/llama-cli.exe
-#   ./data/stable_diffusion_binaries/sd.exe
+#   ./data/stable_diffusion_binaries/sd-cli.exe  (sd-server.exe also copied)
 #
 # get_build_status() checks those locations first, then falls back to PATH.
 # ---------------------------------------------------------------------------
@@ -288,13 +288,13 @@ def get_build_status() -> Dict[str, Any]:
 
     Looks in:
       1. ./data/llama_cpp_binaries/       for llama-cli.exe
-      2. ./data/stable_diffusion_binaries/ for sd.exe
+      2. ./data/stable_diffusion_binaries/ for sd-cli.exe (or legacy sd.exe)
       3. PATH (shutil.which) as fallback
 
     Returns a dict compatible with launcher.py and display.py:
         llama_built  : bool  - llama-cli.exe found
         llama_path   : str   - path string or ""
-        sd_built     : bool  - sd.exe found
+        sd_built     : bool  - sd-cli.exe (or sd.exe) found
         sd_path      : str   - path string or ""
     """
     llama_bin_dir = configure.get_llama_bin_dir()
@@ -306,10 +306,10 @@ def get_build_status() -> Dict[str, Any]:
         found = shutil.which("llama-cli") or shutil.which("main")
         llama_exe = Path(found) if found else None
 
-    # sd
-    sd_exe = _find_exe_in_dir(sd_bin_dir, ["sd.exe", "sd"])
+    # sd-cli.exe is the current output name; sd.exe kept as legacy fallback
+    sd_exe = _find_exe_in_dir(sd_bin_dir, ["sd-cli.exe", "sd-cli", "sd.exe", "sd"])
     if not sd_exe:
-        found = shutil.which("sd")
+        found = shutil.which("sd-cli") or shutil.which("sd")
         sd_exe = Path(found) if found else None
 
     return {
