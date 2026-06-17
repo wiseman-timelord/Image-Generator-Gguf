@@ -51,12 +51,10 @@ A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder
 ```
 
 ### Requirements:
-- We will be programming towards Python ~3.12 and windows 10 22h2.
-- Vulkan 1.3 card is available with Vulkan 1.4 installed, but its on gpu 1 not gpu 0. On gpu 1 there is =>8GB. we are not using GPU 0, GPU 0 is for the monitors. When compiling for Vulkan we will also ensure to include cpu optimizations too, so its optimized for, Vulkan, F16C, AVX, AVX2, FMA, where possible.
-- CPU is aimed at zen 2 with AOCL installed. if cannot load to Vulkan. We compile CPU libraries/packages for F16C, AVX, AVX2, FMA, where possible. CPU will always use by default 85% threads on the CPU, where multi-thread will enhance performance during significant phases. Installer should detect the number of threads/cores during installation, and write this down to a key in ".\data\constants.ini". .
-- Libraries for encoder, possibly we could have llama.cpp vulkan, and stick that on the 8GB of vram on the passive secondary rx 470 (this is not hip, so stick to vulkan). 
-- Libraries for image generation, Stable Diffusion on CPU, if not able to be done on vulkan. If vulkan is an option then put the image generation model on the GPU, and have the encoder on the CPU instead.
-- Arcitecture features detected/supported now includes, SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, AVX, AVX2, AVX512, F16C, FMA.
+- Platform - Programming towards and testing upon, Windows 10 22h2 with Python 3.12, it may work on Windows 11 and nearby versions of Python. T.B.A.
+- Graphics- Programming towards and testing upon, Vulkan 1.3 card with Vulkan 1.4 driver installed. Additionally CPU arcitecture features will be detected used when building for Vulkan including list shown below.
+- Processor - Detecting/supporting, SSE, SSE2, SSE3, SSSE3, SSE4.1, SSE4.2, AVX, AVX2, AVX512, F16C, FMA, architecture features. Testing upon Zen 2 with AOCL installed. CPU will always use by default 85% threads on the CPU.
+- Libraries - Required libraries is handled by the installer script, but they include both, Llama.Cpp and Stable Diffusion.
 
 ### Models...
 I put Q# because it should support any quantization, the model variety will be expanded upon later....
