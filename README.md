@@ -32,22 +32,49 @@ A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder
 * Running on local URL:  http://127.0.0.1:7860
 * To create a public link, set `share=True` in `launch()`.
 ```
-- Installer script has Check/Reinstall, incase issues during install (A007)...
+- Installer script has Check/Reinstall feature, incase issues during install (A007)...
 ```
-(...)
+  ==============================================================================
+      Image-Generator-Gguf — Installation
+  ==============================================================================
+
+  constants.ini written → C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\constants.ini
+
+  Python virtual environment...
+  -----------------------------
+  venv already exists at C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\venv
+
+  Python dependencies...
+  ----------------------
+  Upgrading pip inside venv...
+    Installing gradio>=5.0...
+    gradio>=5.0 OK
+    Installing Pillow>=10.0...
+    Pillow>=10.0 OK
+    Installing numpy>=1.26...
+    numpy>=1.26 OK
+  All packages installed OK.
 
   Backend compile  (Vulkan)  —  llama.cpp + stable-diffusion.cpp...
   -----------------------------------------------------------------
-
   llama.cpp...
     llama-cli.exe already present, skipping clone and build.
     llama.cpp  →  success (binary already present)
 
   stable-diffusion.cpp...
-    sd.exe not present, cloning and building...
-    Cloning stable-diffusion.cpp (ref: master) — attempt 1/3
+    sd-cli.exe (or sd.exe) already present, skipping clone and build.
+    stable-diffusion.cpp  →  success (binary already present)
 
-(...)
+  Installation summary
+  --------------------
+  Time elapsed : 4.4s
+  constants.ini: C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\constants.ini
+  persistent   : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\persistent.json
+  venv         : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\venv
+  llama bins   : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\llama_cpp_binaries
+  sd bins      : C:\Inference_Files\Image-Generator-Gguf\Image-Generator-Gguf\data\stable_diffusion_binaries
+
+  Press Enter to return to the batch menu...
 ```
 
 ### Requirements:
