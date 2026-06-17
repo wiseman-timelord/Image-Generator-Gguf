@@ -1,3 +1,4 @@
+![image missing](https://raw.githubusercontent.com/wiseman-timelord/Image-Generator-Gguf/refs/heads/main/media/banner_generation.jpg)
 # Image-Generator-Gguf
 Status: Development/Alpha
 
@@ -5,9 +6,6 @@ Status: Development/Alpha
 A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. The program WiseMan-TimeLord probably should have done before doing other image based llm applications WiseMan-TimeLord have produced, this will be a simple image generation project, but eventually cover several encoders and image generation models.
 
 ### Media
-- 
-![image missing](https://raw.githubusercontent.com/wiseman-timelord/Image-Generator-Gguf/refs/heads/main/media/banner_generation.jpg)
-
 - Program starts something like this (A005)...
 ```
 
