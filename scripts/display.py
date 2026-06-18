@@ -164,6 +164,10 @@ def _build_generate_tab_inner() -> None:
                 )
 
             with gr.Row():
+                _gen["batch_dd"] = gr.Dropdown(label="Batch Count",
+                                               choices=configure.BATCH_COUNT_CHOICES,
+                                               value=cfg.get("imagegen_batch_count", 1)
+                )
                 _gen["width_dd"]  = gr.Dropdown(label="Width",  choices=configure.IMAGE_SIZES,
                                                 value=cfg.get("imagegen_width", 512))
                 _gen["height_dd"] = gr.Dropdown(label="Height", choices=configure.IMAGE_SIZES,
@@ -184,10 +188,7 @@ def _build_generate_tab_inner() -> None:
                 )
                 _gen["seed_num"] = gr.Number(label="Seed (-1 = random)",
                                              value=cfg.get("imagegen_seed", -1), precision=0)
-                _gen["batch_dd"] = gr.Dropdown(label="Batch Count",
-                                               choices=configure.BATCH_COUNT_CHOICES,
-                                               value=cfg.get("imagegen_batch_count", 1)
-                )
+
 
             _gen["save_btn"]    = gr.Button("Save as Default", size="sm")
 
