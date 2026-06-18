@@ -65,7 +65,7 @@ def _print_banner() -> None:
 def main() -> None:
     configure.ensure_data_dirs()
     _print_banner()
-    app = display.build_app()
+    app, _css = display.build_app()
 
     # Suppress the Starlette deprecation warning from Gradio internals
     import warnings
@@ -81,6 +81,7 @@ def main() -> None:
         inbrowser=True,
         show_error=True,
         theme=gr.themes.Soft(),
+        css=_css,
     )
 
 if __name__ == "__main__":

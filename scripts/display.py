@@ -1,6 +1,6 @@
 #!/usr/env python3
 """
-display.py - Gradio 5 UI for Image Generator GGUF.
+display.py - Gradio 5 UI for Image-Gradio-Gguf.
 Three tabs: Generate | Configuration | Debug / Info
 Build/install functionality lives in installer.py only.
 """
@@ -8,7 +8,6 @@ Build/install functionality lives in installer.py only.
 from __future__ import annotations
 
 import os
-import platform
 import subprocess
 import sys
 import traceback
@@ -18,7 +17,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 import scripts.configure as configure
 import scripts.inference as inference
-import scripts.utilities as utilities
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +191,10 @@ def _build_generate_tab_inner() -> None:
 
             _gen["save_btn"]    = gr.Button("Save as Default", size="sm")
 
+
         # ── Right column: generate + gallery ────────────────────────────────
         with gr.Column(scale=2):
+            gr.Markdown("### Output")
             with gr.Row(visible=configured) as _gen["generate_row"]:
                 _gen["generate_btn"] = gr.Button("Generate", variant="primary", size="lg")
                 _gen["stop_btn"]     = gr.Button("Stop", variant="stop")
@@ -206,6 +206,9 @@ def _build_generate_tab_inner() -> None:
                 object_fit="contain",
             )
 
+    with gr.Row():
+        with gr.Column(scale=2):
+            gr.Markdown("### Gallery")
             # ── Recent images strip (horizontal scroll, thumbnails) ──
             _gen["recent_strip"] = gr.HTML(
                 value="",
@@ -405,7 +408,6 @@ def _build_config_tab_inner() -> None:
                     label="Encoder Name",
                     value=cfg.get("encoder_model_name", ""),
                     placeholder="Qwen3-4b-Z-Image-Turbo",
-                    info="Encoder model file stem — auto-filled when you Browse.",
                     interactive=True,
                     scale=8,
                 )
@@ -417,7 +419,6 @@ def _build_config_tab_inner() -> None:
                     label="Diffusion Name",
                     value=cfg.get("imagegen_model_name", ""),
                     placeholder="z_image_turbo",
-                    info="Diffusion model file stem — auto-filled when you Browse.",
                     interactive=True,
                     scale=8,
                 )
@@ -435,13 +436,11 @@ def _build_config_tab_inner() -> None:
     gr.Markdown("### Backend Selection")
     if is_cpu_only:
         gr.Markdown(
-            "**CPU-only install** — GPU options are not available. "
-            "Re-run the installer and choose the Vulkan route to enable GPU backends."
+            "GPU options are not available (Cpu-only install). "
         )
     else:
         gr.Markdown(
-            "Choices are populated from `data/constants.ini` written during installation. "
-            "CPU = run on processor. Vulkan GPU N = run on that GPU."
+            "GPU options are available (Vulkan install). "
         )
     with gr.Row():
         with gr.Column(scale=2):
@@ -449,16 +448,14 @@ def _build_config_tab_inner() -> None:
                 label="Encoder Backend",
                 choices=choices,
                 value=_default_backend_value("backend_encoder"),
-                info="Where to run the LLM prompt encoder.",
                 interactive=not is_cpu_only,
             )
 
         with gr.Column(scale=1):
             _cfg_w["threads_dd"] = gr.Dropdown(
-                label="CPU Threads (both encoder & imagegen)",
+                label="CPU Threads",
                 choices=threads,
                 value=cfg.get("encoder_threads", dt),
-                info="Leave some free for browsing etc.",
             )
 
         with gr.Column(scale=2):
@@ -466,7 +463,6 @@ def _build_config_tab_inner() -> None:
                 label="ImageGen Backend",
                 choices=choices,
                 value=_default_backend_value("backend_imagegen"),
-                info="Where to run image diffusion.",
                 interactive=not is_cpu_only,
             )
 
@@ -506,10 +502,10 @@ def _build_config_tab_inner() -> None:
     # ── Prompt template ──
     gr.Markdown("### Advanced")
     _cfg_w["prompt_template_tb"] = gr.Textbox(
-        label="Prompt Template  ({prompt} is replaced by the user input)",
+        label="Prompt Template",
         value=cfg.get("prompt_template",
                       "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"),
-        lines=3,
+        lines=2,
     )
 
     # ── Save ──
@@ -607,82 +603,32 @@ def _wire_config_events(status_box: gr.Textbox) -> None:
 # ---------------------------------------------------------------------------
 
 def _collect_debug() -> str:
-    """Collect system information; returns a string. Errors are caught and shown."""
+    """
+    Show the raw contents of data/constants.ini so the user
+    can see exactly what was detected and written during installation.
+    """
     try:
-        import time
-        cpu  = configure.get_cpu_info()
-        vk   = configure.get_vulkan_info()
-        mem  = utilities.get_memory_info()
-        bs   = utilities.get_build_status()
-        cfg  = configure.load_persistent()
-        env  = utilities.get_relevant_env()
-
-        enc_path  = cfg.get("encoder_model_path", "")
-        diff_path = cfg.get("imagegen_model_path", "")
-        vae_path  = cfg.get("vae_model_path", "")
-
+        width = 48
         L: List[str] = []
-        L.append("=" * 72)
-        L.append(f"  DEBUG REPORT  {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        L.append("=" * 72)
-
-        L.append(f"\nPython  : {platform.python_version()}")
-        try:
-            import gradio as gr
-            L.append(f"Gradio  : {gr.__version__}")
-        except Exception:
-            L.append("Gradio  : not importable")
-        L.append(f"Platform: {platform.platform()}")
-
-        L.append(f"\nCPU     : {cpu['brand']}  [{cpu['vendor']}]  {cpu['cores_logical']} threads")
-        L.append(f"Default : {cpu['default_threads']} threads (85%)")
-        L.append(f"AVX2:{cpu['has_avx2']}  F16C:{cpu['has_f16c']}  FMA:{cpu['has_fma']}  "
-                 f"AVX512:{cpu['has_avx512']}  AOCL:{cpu['has_aocl']}")
-
-        if mem:
-            L.append(f"\nRAM     : {mem.get('ram_used_mb','?')} / "
-                     f"{mem.get('ram_total_mb','?')} MB  ({mem.get('ram_percent','?')}%)")
-
-        L.append(f"\nVulkan  : {vk['available']}  ver={vk['version']}")
-        L.append(f"SDK     : {vk['sdk'] or 'not set'}")
-        for d in vk["devices"]:
-            L.append(f"  GPU{d['index']}: {d['name']}")
-
-        L.append(f"\nllama.cpp : {'built  ' + bs['llama_path'] if bs['llama_built'] else 'NOT BUILT'}")
-        L.append(f"sd.cpp    : {'built  ' + bs['sd_path']    if bs['sd_built']    else 'NOT BUILT'}")
-
-        ll = inference.find_llama_cli()
-        sd = inference.find_sd_cpp()
-        L.append(f"\nllama-cli : {ll or 'NOT FOUND'}")
-        L.append(f"sd exe    : {sd or 'NOT FOUND'}")
-
-        def _status(p: str) -> str:
-            if not p:
-                return "NOT SET"
-            return ("EXISTS  " if Path(p).exists() else "MISSING ") + p
-
-        L.append(f"\nEncoder  : {_status(enc_path)}")
-        L.append(f"Diffusion: {_status(diff_path)}")
-        L.append(f"VAE      : {_status(vae_path)}")
-
-        L.append(f"\nEnc backend : {cfg.get('backend_encoder','?')}")
-        L.append(f"Img backend : {cfg.get('backend_imagegen','?')}")
-        L.append(f"Enc threads : {cfg.get('encoder_threads','?')}")
-        L.append(f"Img threads : {cfg.get('imagegen_threads','?')}")
-        L.append(f"Size        : {cfg.get('imagegen_width','?')}×{cfg.get('imagegen_height','?')}")
-        L.append(f"Steps       : {cfg.get('imagegen_steps','?')}  "
-                 f"CFG: {cfg.get('imagegen_cfg_scale','?')}  "
-                 f"Sampler: {cfg.get('imagegen_sampling','?')}")
-
-        if env:
-            L.append(f"\nEnvironment:")
-            for k, v in sorted(env.items()):
-                L.append(f"  {k} = {v}")
-
-        L.append("\n" + "=" * 72)
+        
+        # --- constants.ini ---
+        L.append("=" * width)
+        L.append("  CONSTANTS.INI")
+        L.append("=" * width)
+        L.append("")
+        constants_path = configure.get_constants_path()
+        if constants_path.exists():
+            try:
+                with open(constants_path, "r", encoding="utf-8") as _f:
+                    L.append(_f.read())
+            except Exception as _e:
+                L.append(f"  (error reading constants.ini: {_e})")
+        else:
+            L.append(f"  (constants.ini not found at: {constants_path})")
+        L.append("=" * width)
         return "\n".join(L)
-    except Exception as e:
-        return f"Error collecting debug info:\n\n{traceback.format_exc()}"
+    except Exception:
+        return f"Error collecting debug info:\n{traceback.format_exc()}"
 
 
 def _copy_to_clipboard(text: str) -> str:
@@ -700,20 +646,35 @@ def _copy_to_clipboard(text: str) -> str:
 
 
 def _build_debug_tab_inner() -> gr.Textbox:
-    """Build Debug tab widgets; copy/refresh wired later."""
-    with gr.Row():
-        _dbg["refresh_btn"] = gr.Button("Refresh", variant="primary")
-        _dbg["copy_btn"]    = gr.Button("Copy to Clipboard")
-    # Pre-populate with debug info (no need for app.load)
-    _dbg["info_text"] = gr.Textbox(
-        label="System Information",
-        interactive=False,
-        lines=38, max_lines=80,
-        autoscroll=False,
-        value=_collect_debug(),   # Call directly to show info on load
-    )
+    """Build Debug tab widgets; info section above, debug info below."""
+    with gr.Group():
+        gr.Markdown("### Image-Gradio-Gguf")
+        gr.HTML(
+            "<p>A Windows local image generator using Gradio, llama.cpp and stable-diffusion.cpp, by "
+            "<a href=\"mailto:wiseman-timelord@mail.com\">WiseMan-Time-Lord</a> at "
+            "<a href=\"http://wisetime.rf.gd/\">WiseTime.Rf.Gd</a></p>"
+            "<p><strong>Where you may find this and my other programming projects on </strong>"
+            "<a href=\"https://github.com/wiseman-timelord\">GitHub</a></p>"
+            "<p><strong>Support/Donate to assist in the continuation of my projects at, </strong>"
+            "<a href=\"https://patreon.com/WiseManTimeLord\">Patreon</a>, "
+            "<a href=\"https://ko-fi.com/WiseManTimeLord\">Ko-Fi</a></p>",
+            elem_classes=["info-textbox-match"],
+        )
+        with gr.Row():
+            _dbg["refresh_btn"] = gr.Button("Refresh", variant="primary")
+            _dbg["copy_btn"]    = gr.Button("Copy to Clipboard")
 
-    _dbg["refresh_btn"].click(_collect_debug, outputs=_dbg["info_text"])
+        # Pre-populate with debug info (no need for app.load)
+        _dbg["info_text"] = gr.Textbox(
+            label="Debug Info",
+            interactive=False,
+            lines=14, max_lines=30,
+            autoscroll=False,
+            value=_collect_debug(),   # Call directly to show info on load
+        )
+
+        _dbg["refresh_btn"].click(_collect_debug, outputs=_dbg["info_text"])
+
     return _dbg["info_text"]
 
 
@@ -754,8 +715,9 @@ def _render_recent_strip_standalone() -> str:
 # App assembly
 # ---------------------------------------------------------------------------
 
-def build_app() -> gr.Blocks:
-    """Assemble and return the Gradio application."""
+def build_app():
+    """Assemble and return (app, css) for Gradio 6+.
+    css must be passed to launch() rather than the Blocks constructor."""
     configure.ensure_data_dirs()
 
     _css = """
@@ -816,12 +778,8 @@ def build_app() -> gr.Blocks:
 }
 """
 
-    with gr.Blocks(title="Image Generator GGUF", css=_css) as app:
-        gr.Markdown("# Image Generator GGUF")
-        gr.Markdown(
-            "Local image generation using GGUF diffusion models "
-            "with optional LLM prompt enhancement."
-        )
+    with gr.Blocks(title="Image-Gradio-Gguf") as app:
+        gr.Markdown("# Image-Gradio-Gguf")
 
         # ── Tabs ──────────────────────────────────────────────────────────────
         with gr.Tabs():
@@ -864,4 +822,4 @@ def build_app() -> gr.Blocks:
         # Populate recent images strip on load
         app.load(_render_recent_strip_standalone, outputs=_gen["recent_strip"])
 
-    return app
+    return app, _css
