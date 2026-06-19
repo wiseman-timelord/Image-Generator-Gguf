@@ -290,8 +290,74 @@ def _probe_safetensors(p: Path) -> Optional[Dict[str, Any]]:
 # Prompt enhancement
 # ---------------------------------------------------------------------------
 
+# Used to resolve the -1 sentinel ("all layers") into a concrete count 
+# before retry dampening arithmetic. Sourced from configure.py to keep 
+# model constraints centralized.
+_QWEN3_4B_LAYERS: int = configure.ENCODER_MAX_LAYERS
+
+# OOM fingerprints that appear in llama-cli stdout/stderr output.
+_OOM_MARKERS: Tuple[str, ...] = (
+    "out of memory",
+    "erroroutofdevicememory",
+    "alloc.*failed",
+    "failed to allocate",
+    "ggml_vulkan: device memory allocation",
+    "cudamalloc failed",
+)
+
+
+def _is_oom_output(text: str) -> bool:
+    """Return True if the combined process output contains an OOM indicator."""
+    lower = text.lower().replace(" ", "")
+    for marker in _OOM_MARKERS:
+        # markers without regex wildcards: simple substring match
+        if "*" not in marker:
+            if marker.replace(" ", "") in lower:
+                return True
+        else:
+            import re
+            if re.search(marker, text, re.IGNORECASE):
+                return True
+    return False
+
+
+def _resolve_gpu_layers(raw: int, model_path: str) -> int:
+    """
+    Resolve the -1 sentinel to a concrete layer count.
+
+    -1 means "offload all layers".  We use the known layer count for the
+    Qwen3-4B family; for any other model we fall back to 99 (llama.cpp treats
+    values larger than the actual layer count as "all layers").
+    """
+    if raw >= 0:
+        return raw
+    # -1 sentinel: resolve to model-specific maximum
+    name = Path(model_path).name.lower()
+    if "qwen3" in name and ("4b" in name or "4-b" in name):
+        return _QWEN3_4B_LAYERS
+    # Unknown model: return a large number llama.cpp interprets as "all"
+    return 99
+
+
 def enhance_prompt(prompt: str, cfg: Dict[str, Any],
-                   progress_callback: Optional[Callable] = None) -> str:
+                   progress_callback: Optional[Callable] = None,
+                   _oom_status_callback: Optional[Callable[[str], None]] = None,
+                   ) -> str:
+    """
+    Run llama-cli to expand the user prompt into a rich image-gen prompt.
+
+    If the encoder backend is Vulkan and the process exits with an OOM
+    indication, up to 3 retries are attempted with progressively fewer GPU
+    layers (reductions of 1, then 2, then 4 from the previous attempt).
+    On exhausting all retries the original prompt is returned and
+    _oom_status_callback (if supplied) is called with a user-facing message.
+
+    Retry schedule (example, Qwen3-4B at -1 → 36 layers):
+        Attempt 1 : ngl = 36   (or configured value)
+        Attempt 2 : ngl = 35   (-1 from previous)
+        Attempt 3 : ngl = 33   (-2 from previous)
+        Attempt 4 : ngl = 29   (-4 from previous)
+    """
     model_path = cfg.get("encoder_model_path", "")
     if not model_path or not Path(model_path).exists():
         return prompt
@@ -309,48 +375,103 @@ def enhance_prompt(prompt: str, cfg: Dict[str, Any],
     full_prompt = template.replace(
         "{prompt}", f"{system_msg}\n\nUser request: {prompt}")
 
-    args = [
+    base_args = [
         str(cli), "-m", model_path, "-p", full_prompt,
         "-c", str(cfg.get("encoder_ctx_size", 4096)),
         "-t", str(cfg.get("encoder_threads", configure.get_default_threads())),
         "-b", str(cfg.get("encoder_batch_size", 512)),
         "-n", "256", "--temp", "0.7", "--log-disable",
     ]
-
-    backend = cfg.get("backend_encoder", "Vulkan GPU 1")
-    env = os.environ.copy()
-    if "Vulkan" in backend:
-        args.extend(["-ngl", str(cfg.get("encoder_gpu_layers", 99))])
-        env["GGML_VULKAN_DEVICE"] = str(cfg.get("vulkan_device", 1))
-    else:
-        args.extend(["-ngl", "0"])
-
     if cfg.get("encoder_flash_attn", True):
-        args.append("--flash-attn")
+        base_args.append("--flash-attn")
 
-    try:
-        if progress_callback:
-            progress_callback("Enhancing prompt with LLM...", 0.1)
-        result = subprocess.run(args, capture_output=True, text=True,
-                                timeout=120, encoding="utf-8",
-                                errors="replace", env=env)
-        output = result.stdout.strip()
-        if output:
-            for marker in ("<|im_start|>assistant", "<|start_header_id|>assistant"):
-                if marker in output:
-                    output = output.split(marker)[-1]
-                    break
-            for marker in ("<|im_end|>", "<|im_start|>", "<|eot_id|>"):
-                output = output.replace(marker, "")
-            output = output.strip()
-        if output and len(output) > 10:
+    backend = cfg.get("backend_encoder", "CPU")
+    use_vulkan = "Vulkan" in backend
+    env = os.environ.copy()
+
+    if use_vulkan:
+        env["GGML_VULKAN_DEVICE"] = str(cfg.get("vulkan_device", 1))
+        raw_ngl = int(cfg.get("encoder_gpu_layers", -1))
+        current_ngl = _resolve_gpu_layers(raw_ngl, model_path)
+    else:
+        current_ngl = 0
+
+    # Retry dampening: reductions applied cumulatively each attempt.
+    # Attempt 0 (first run) uses current_ngl unchanged.
+    # Attempt 1 : subtract 1  (total -1)
+    # Attempt 2 : subtract 2  (total -3)
+    # Attempt 3 : subtract 4  (total -7)
+    _retry_reductions: Tuple[int, ...] = (0, 1, 2, 4)
+    max_attempts = len(_retry_reductions)  # 4
+
+    if progress_callback:
+        progress_callback("Enhancing prompt with LLM...", 0.1)
+
+    for attempt in range(max_attempts):
+        # Cumulative layer reduction across retries: 0, -1, -3, -7
+        cumulative_cut = sum(_retry_reductions[1:attempt + 1])
+        ngl = max(0, current_ngl - cumulative_cut)
+
+        args = base_args + ["-ngl", str(ngl)]
+
+        if attempt > 0:
+            print(
+                f"[enhance_prompt] OOM retry {attempt}/{max_attempts - 1}: "
+                f"ngl={ngl} (was {ngl + sum(_retry_reductions[attempt:attempt + 1])})",
+                flush=True,
+            )
             if progress_callback:
-                progress_callback("Prompt enhanced.", 0.2)
-            return output[:2000]
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception:
-        pass
+                progress_callback(
+                    f"Enhancing prompt (OOM retry {attempt}, ngl={ngl})...", 0.1)
+
+        try:
+            result = subprocess.run(
+                args, capture_output=True, text=True,
+                timeout=120, encoding="utf-8", errors="replace", env=env,
+            )
+            combined_output = result.stdout + result.stderr
+
+            # Check for OOM before inspecting the text output
+            if result.returncode != 0 and _is_oom_output(combined_output):
+                print(
+                    f"[enhance_prompt] OOM detected (attempt {attempt + 1}, "
+                    f"ngl={ngl}, exit={result.returncode})",
+                    flush=True,
+                )
+                if attempt < max_attempts - 1:
+                    continue  # retry with fewer layers
+                # All retries exhausted
+                oom_msg = (
+                    "Out of memory — reduce encoder GPU layers in the "
+                    "Configuration page."
+                )
+                print(f"[enhance_prompt] {oom_msg}", flush=True)
+                if _oom_status_callback:
+                    _oom_status_callback(oom_msg)
+                return prompt
+
+            output = result.stdout.strip()
+            if output:
+                for marker in ("<|im_start|>assistant", "<|start_header_id|>assistant"):
+                    if marker in output:
+                        output = output.split(marker)[-1]
+                        break
+                for marker in ("<|im_end|>", "<|im_start|>", "<|eot_id|>"):
+                    output = output.replace(marker, "")
+                output = output.strip()
+            if output and len(output) > 10:
+                if progress_callback:
+                    progress_callback("Prompt enhanced.", 0.2)
+                return output[:2000]
+
+            # Non-OOM failure or empty output — no point retrying
+            break
+
+        except subprocess.TimeoutExpired:
+            break
+        except Exception:
+            break
+
     return prompt
 
 
@@ -383,13 +504,21 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
                              "Run installer or build from Configuration tab.")
         return result
 
-    # Enhance prompt
+    # Enhance prompt — wire OOM status so the message surfaces in the UI.
     enhanced = prompt
+    _oom_msg: List[str] = []  # populated by callback if OOM exhausted all retries
     if cfg.get("encoder_model_path") and Path(cfg["encoder_model_path"]).exists():
         try:
-            enhanced = enhance_prompt(prompt, cfg, progress_callback)
+            enhanced = enhance_prompt(
+                prompt, cfg, progress_callback,
+                _oom_status_callback=lambda msg: _oom_msg.append(msg),
+            )
         except Exception:
             enhanced = prompt
+    # Surface OOM message to caller if enhance_prompt reported it.
+    if _oom_msg:
+        result["message"] = _oom_msg[-1]
+        return result
 
     # Seed
     seed = cfg.get("imagegen_seed", -1)
@@ -435,9 +564,31 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
     if neg:
         args.extend(["-n", neg])
 
-    backend = cfg.get("backend_imagegen", "CPU")
+    # ------------------------------------------------------------------
+    # Device / component placement.
+    #
+    # sd.cpp has NO per-layer GPU offload for the diffusion model (unlike
+    # llama.cpp's -ngl). Placement is whole-component only, controlled by
+    # three real flags: --backend vulkanN (use the GPU device at all),
+    # --clip-on-cpu (keep the text encoder — including the Qwen3 --llm
+    # encoder used here — off VRAM), and --vae-on-cpu (keep the VAE off
+    # VRAM). imagegen_placement selects between Full GPU / Split / Full CPU
+    # via parse_diffuser_placement(), which returns exactly these booleans.
+    #
+    # Previously this only checked "Vulkan" in backend_imagegen and, when
+    # true, always passed --backend vulkanN AND tried to keep the encoder
+    # off VRAM with "--llm-to-cpu" — a flag that does not exist in sd.cpp.
+    # That flag was silently ignored, so the encoder always loaded onto
+    # VRAM alongside the diffusion model, which is what caused the
+    # ErrorOutOfDeviceMemory crash. It also meant selecting "CPU" for the
+    # ImageGen backend never actually stopped sd.cpp from using Vulkan,
+    # since nothing forced --backend off.
+    # ------------------------------------------------------------------
+    placement_label = cfg.get("imagegen_placement", configure.DIFFUSER_PLACEMENT_FULL_GPU)
+    placement = configure.parse_diffuser_placement(placement_label)
+
     env = os.environ.copy()
-    if "Vulkan" in backend:
+    if placement["use_vulkan_backend"]:
         vk_dev = cfg.get("vulkan_device", 1)
         # --backend replaces --vulkan in current sd.cpp builds.
         # Format: --backend vulkan{N}  (e.g. --backend vulkan1)
@@ -445,6 +596,18 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
         sdk = utilities.detect_vulkan().get("vulkan_sdk", "")
         if sdk:
             env["PATH"] = str(Path(sdk) / "Bin") + ";" + env.get("PATH", "")
+    # else: deliberately omit --backend entirely so sd.cpp never attempts
+    # a Vulkan device allocation — this is the actual CPU-only code path.
+
+    if placement["clip_on_cpu"] and enc_path and Path(enc_path).exists():
+        # Real sd.cpp flag (the text-encoder equivalent of llama.cpp's
+        # --llm-to-cpu, which does not exist). Keeps the Qwen3 conditioner
+        # weights (~3.6GB) off VRAM so only the diffusion model + VAE
+        # (~4.6GB) occupy the GPU, fitting in an 8GB card.
+        args.append("--clip-on-cpu")
+
+    if placement["vae_on_cpu"]:
+        args.append("--vae-on-cpu")
 
     batch = int(cfg.get("imagegen_batch_count", 1))
     if batch > 1:

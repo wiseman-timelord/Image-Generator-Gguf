@@ -467,6 +467,17 @@ def _build_config_tab_inner() -> None:
                 interactive=not is_cpu_only,
             )
 
+    # Initial interactive/value state for the two GPU-dependent controls
+    # below is driven by the ACTUAL selected backend, not just install type.
+    # A Vulkan-capable install with "CPU" currently selected must still show
+    # GPU Layers / Diffuser Placement as locked at their CPU-forced values —
+    # otherwise the controls look interactive but silently have no effect,
+    # which was the root of the original bug report.
+    enc_backend_val = _default_backend_value("backend_encoder")
+    enc_is_vulkan   = (not is_cpu_only) and ("Vulkan" in enc_backend_val)
+    img_backend_val = _default_backend_value("backend_imagegen")
+    img_is_vulkan   = (not is_cpu_only) and ("Vulkan" in img_backend_val)
+
     with gr.Row():
         # ── Encoder (LLM) settings ──
         with gr.Column(scale=2):
@@ -480,12 +491,14 @@ def _build_config_tab_inner() -> None:
                                          value=cfg.get("encoder_ctx_size", 4096))
 
             with gr.Row():
-                _cfg_w["enc_ngl_dd"] = gr.Dropdown(label="GPU Layers",
-                                         choices=configure.GPU_LAYER_CHOICES,
-                                         value=0 if is_cpu_only else cfg.get("encoder_gpu_layers", -1),
-                                         info="Not applicable for CPU-only install." if is_cpu_only else "(-1 = all).",
-                                         interactive=not is_cpu_only,
-                                         )
+                _cfg_w["enc_ngl_dd"] = gr.Dropdown(
+                    label="GPU Layers",
+                    choices=configure.GPU_LAYER_CHOICES,
+                    value=cfg.get("encoder_gpu_layers", -1) if enc_is_vulkan else 0,
+                    info=("(-1 = all layers)." if enc_is_vulkan
+                          else "Encoder Backend is CPU — all layers run on CPU."),
+                    interactive=enc_is_vulkan,
+                )
                 _cfg_w["enc_flash_chk"] = gr.Checkbox(
                     label="Flash Attention",
                     value=cfg.get("encoder_flash_attn", True),
@@ -499,6 +512,21 @@ def _build_config_tab_inner() -> None:
                 _cfg_w["img_clip_dd"] = gr.Dropdown(label="CLIP Skip",
                                           choices=configure.CLIP_SKIP_CHOICES,
                                           value=cfg.get("imagegen_clip_skip", 2))
+            with gr.Row():
+                # sd.cpp has no per-layer GPU offload for the diffuser (no
+                # -ngl equivalent) — only whole-component placement, so this
+                # is a 3-way choice rather than a layer-count dropdown. See
+                # configure.DIFFUSER_PLACEMENT_CHOICES / parse_diffuser_placement().
+                _cfg_w["img_placement_dd"] = gr.Dropdown(
+                    label="Diffuser Placement",
+                    choices=configure.DIFFUSER_PLACEMENT_CHOICES,
+                    value=(cfg.get("imagegen_placement", configure.DIFFUSER_PLACEMENT_FULL_GPU)
+                          if img_is_vulkan else configure.DIFFUSER_PLACEMENT_FULL_CPU),
+                    info=("Split keeps the encoder+VAE on CPU, diffusion model on GPU."
+                          if img_is_vulkan else
+                          "ImageGen Backend is CPU — sd.cpp will not touch the GPU at all."),
+                    interactive=img_is_vulkan,
+                )
 
     # ── Prompt template ──
     gr.Markdown("### Advanced")
@@ -548,6 +576,55 @@ def _build_config_tab_inner() -> None:
         outputs=[_cfg_w["vae_path_tb"], _cfg_w["vae_name_tb"]]
     )
 
+    # ── Keep GPU Layers / Diffuser Placement in sync with their backend
+    # dropdowns. Switching a backend to CPU must force the dependent
+    # control to its CPU value and lock it (0 layers / Full CPU placement);
+    # switching back to Vulkan must restore the last value the user had
+    # and re-enable editing. Without this, the dropdowns stayed interactive
+    # and showed stale numbers no matter what backend was actually selected
+    # — which is what made it look like the CPU selection "did nothing".
+    _last_ngl_value: Dict[str, int] = {"v": cfg.get("encoder_gpu_layers", -1)}
+    _last_placement_value: Dict[str, str] = {
+        "v": cfg.get("imagegen_placement", configure.DIFFUSER_PLACEMENT_FULL_GPU)
+    }
+
+    def _on_enc_backend_change(backend_choice: str, current_ngl):
+        if "Vulkan" in backend_choice:
+            restore = _last_ngl_value["v"]
+            return gr.update(value=restore, interactive=True,
+                             info="(-1 = all layers).")
+        # Remember the value the user had before forcing it to 0, so
+        # switching back to Vulkan restores it instead of resetting to -1.
+        if current_ngl is not None:
+            try:
+                _last_ngl_value["v"] = int(current_ngl)
+            except (TypeError, ValueError):
+                pass
+        return gr.update(value=0, interactive=False,
+                         info="Encoder Backend is CPU — all layers run on CPU.")
+
+    _cfg_w["enc_backend_dd"].change(
+        _on_enc_backend_change,
+        inputs=[_cfg_w["enc_backend_dd"], _cfg_w["enc_ngl_dd"]],
+        outputs=_cfg_w["enc_ngl_dd"],
+    )
+
+    def _on_img_backend_change(backend_choice: str, current_placement):
+        if "Vulkan" in backend_choice:
+            restore = _last_placement_value["v"]
+            return gr.update(value=restore, interactive=True,
+                             info="Split keeps the encoder+VAE on CPU, diffusion model on GPU.")
+        if current_placement and current_placement != configure.DIFFUSER_PLACEMENT_FULL_CPU:
+            _last_placement_value["v"] = current_placement
+        return gr.update(value=configure.DIFFUSER_PLACEMENT_FULL_CPU, interactive=False,
+                         info="ImageGen Backend is CPU — sd.cpp will not touch the GPU at all.")
+
+    _cfg_w["img_backend_dd"].change(
+        _on_img_backend_change,
+        inputs=[_cfg_w["img_backend_dd"], _cfg_w["img_placement_dd"]],
+        outputs=_cfg_w["img_placement_dd"],
+    )
+
 
 def _wire_config_events(status_box: gr.Textbox) -> None:
     """Register Configuration tab save event that outputs to shared status_box."""
@@ -556,7 +633,7 @@ def _wire_config_events(status_box: gr.Textbox) -> None:
     def save_all(ep, en, dp, dn, vp, vn,
                  enc_back, img_back, threads,
                  eb, ec, engl, ef,
-                 ic, pt):
+                 ic, img_placement, pt):
         enc_parsed = configure.parse_backend_choice(enc_back)
         img_parsed = configure.parse_backend_choice(img_back)
         configure.update_persistent({
@@ -575,6 +652,7 @@ def _wire_config_events(status_box: gr.Textbox) -> None:
             "encoder_gpu_layers":  int(engl),
             "encoder_flash_attn":  bool(ef),
             "imagegen_clip_skip":  int(ic),
+            "imagegen_placement":  img_placement,
             "prompt_template":     pt,
             "first_run":           False,
         })
@@ -588,7 +666,7 @@ def _wire_config_events(status_box: gr.Textbox) -> None:
             w["enc_backend_dd"], w["img_backend_dd"], w["threads_dd"],
             w["enc_batch_dd"], w["enc_ctx_dd"],
             w["enc_ngl_dd"], w["enc_flash_chk"],
-            w["img_clip_dd"], w["prompt_template_tb"],
+            w["img_clip_dd"], w["img_placement_dd"], w["prompt_template_tb"],
         ],
         outputs=status_box,
     )

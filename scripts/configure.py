@@ -3,9 +3,7 @@ configure.py - Configuration, global variables, constants, maps, and lists.
 All shared constants and config file I/O live here.
 Reads hardware info from data/constants.ini (written by installer.py).
 """
-
 from __future__ import annotations
-
 import configparser
 import json
 import math
@@ -13,22 +11,74 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# ---------------------------------------------------------------------------
+# Encoder model constraints (Qwen3-4B)
+# Sourced from GGUF metadata to ensure UI sliders/dropdowns and logic 
+# respect the actual architecture limits.
+# ---------------------------------------------------------------------------
+ENCODER_MAX_LAYERS = 36
+ENCODER_MAX_CONTEXT = 40960
+ENCODER_EMBEDDING_LENGTH = 2560
+ENCODER_VOCAB_SIZE = 151936
+
+# ---------------------------------------------------------------------------
+# Diffuser model constraints (Z-Image-Turbo / Lumina2-style DiT)
+# Sourced from GGUF metadata (layers(30), layers.0 .. layers.29) supplied by
+# the user. context_refiner / final_layer / embedders are single fixed
+# blocks, not part of the offloadable repeating-layer stack.
+# ---------------------------------------------------------------------------
+DIFFUSER_MAX_LAYERS = 30
+
+# ---------------------------------------------------------------------------
+# IMPORTANT — sd.cpp has NO per-layer GPU offload for the diffusion model.
+# Unlike llama.cpp (-ngl <N>), stable-diffusion.cpp only supports whole-
+# component device placement via --clip-on-cpu, --vae-on-cpu and
+# --offload-to-cpu/--diffusion-fa. There is no "-ngl" equivalent for the
+# diffuser, so we do NOT expose a numeric diffuser GPU-layers control —
+# doing so would be cosmetic only and silently do nothing. (This is exactly
+# what the old "--llm-to-cpu" flag did: it does not exist in sd.cpp, so
+# selecting CPU for the encoder had zero effect on actual VRAM use.)
+#
+# Instead we expose a 3-way placement choice that maps to real sd.cpp flags.
+# See parse_diffuser_placement() below for the mapping.
+# ---------------------------------------------------------------------------
+DIFFUSER_PLACEMENT_FULL_GPU = "Full GPU"
+DIFFUSER_PLACEMENT_SPLIT    = "Split (Diffusion GPU, Encoder/VAE CPU)"
+DIFFUSER_PLACEMENT_FULL_CPU = "Full CPU"
+
+DIFFUSER_PLACEMENT_CHOICES: List[str] = [
+    DIFFUSER_PLACEMENT_FULL_GPU,
+    DIFFUSER_PLACEMENT_SPLIT,
+    DIFFUSER_PLACEMENT_FULL_CPU,
+]
 
 # ---------------------------------------------------------------------------
 # Shared constants / maps / lists
 # ---------------------------------------------------------------------------
-
 SAMPLER_MAP: Dict[str, str] = {
     "euler_a": "euler_a", "euler": "euler", "heun": "heun",
     "dpm2": "dpm2", "dpm++2s_a": "dpm++2s_a", "dpm++2m": "dpm++2m",
     "dpm++2mv2": "dpm++2mv2", "lcm": "lcm", "ddim": "ddim", "plms": "plms",
 }
-
 IMAGE_SIZES       = [256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 1024]
 STEP_CHOICES      = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50]
 BATCH_SIZE_CHOICES = [128, 256, 512, 1024, 2048]
-CTX_SIZE_CHOICES  = [2048, 4096, 8192, 16384, 32768]
-GPU_LAYER_CHOICES = [-1, 0, 10, 20, 30, 40, 50, 99]
+
+# Context size maxes out at the model's trained context length (40960)
+CTX_SIZE_CHOICES  = [2048, 4096, 8192, 16384, 32768, 40960]
+
+# GPU layers maxes out at the model's block count (36).
+# -1 means "offload all layers to GPU" (resolves to 36 in inference.py's
+# _resolve_gpu_layers()). llama.cpp loads exactly that many transformer
+# blocks onto the GPU; anything not offloaded (i.e. any layer count below
+# the full 36, including the implicit remainder when an OOM retry reduces
+# the count) stays resident in system RAM and is computed on CPU for that
+# portion. -1 does NOT mean "spill VRAM overflow into RAM mid-layer" — it
+# simply offloads every layer; if that doesn't fit in VRAM, llama.cpp/sd.cpp
+# will fail to allocate rather than silently falling back, which is why the
+# OOM-retry logic in inference.py progressively lowers ngl on failure.
+GPU_LAYER_CHOICES = [-1, 0, 4, 8, 12, 16, 20, 24, 28, 32, 36]
+
 CLIP_SKIP_CHOICES = [1, 2, 3]
 BATCH_COUNT_CHOICES = [1, 2, 3, 4]
 OUTPUT_FORMATS    = ["png", "jpg", "bmp"]
@@ -246,6 +296,33 @@ def parse_backend_choice(choice: str) -> Dict[str, Any]:
     return {"use_vulkan": False, "vulkan_device": -1}
 
 
+def parse_diffuser_placement(placement: str) -> Dict[str, Any]:
+    """
+    Convert a DIFFUSER_PLACEMENT_* label into the real sd.cpp flags/behavior
+    needed by inference.generate_image().
+
+    Returns:
+        {
+            "use_vulkan_backend": bool,  # whether to pass --backend vulkanN at all
+            "clip_on_cpu":        bool,  # --clip-on-cpu (keeps the Qwen3/LLM
+                                          # text encoder off VRAM — this is the
+                                          # REAL flag; the old "--llm-to-cpu"
+                                          # does not exist in sd.cpp)
+            "vae_on_cpu":         bool,  # --vae-on-cpu
+        }
+
+    sd.cpp has no per-layer GPU offload for the diffusion model, so these
+    three booleans are the entire space of placement control available.
+    """
+    if placement == DIFFUSER_PLACEMENT_FULL_GPU:
+        return {"use_vulkan_backend": True,  "clip_on_cpu": False, "vae_on_cpu": False}
+    if placement == DIFFUSER_PLACEMENT_SPLIT:
+        return {"use_vulkan_backend": True,  "clip_on_cpu": True,  "vae_on_cpu": True}
+    # DIFFUSER_PLACEMENT_FULL_CPU (or unrecognized) — never pass --backend
+    # vulkanN, so sd.cpp never attempts a Vulkan device allocation at all.
+    return {"use_vulkan_backend": False, "clip_on_cpu": True, "vae_on_cpu": True}
+
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -253,6 +330,7 @@ def parse_backend_choice(choice: str) -> Dict[str, Any]:
 def _default_persistent() -> Dict[str, Any]:
     dt = get_default_threads()
     cpu_label = get_cpu_info().get("brand", "CPU") or "CPU"
+    is_cpu_only = get_install_type() == "cpu_only"
     return {
         "encoder_model_path": "", "encoder_model_name": "",
         "imagegen_model_path": "", "imagegen_model_name": "",
@@ -264,6 +342,12 @@ def _default_persistent() -> Dict[str, Any]:
         "encoder_ctx_size": 4096,
         "encoder_flash_attn": True,
         "encoder_gpu_layers": -1,
+        # imagegen_placement controls component-level GPU/CPU split for the
+        # diffuser (see DIFFUSER_PLACEMENT_* / parse_diffuser_placement()).
+        # sd.cpp has no per-layer offload, so this — not a layer count — is
+        # the real equivalent of encoder_gpu_layers for the diffuser side.
+        "imagegen_placement": (DIFFUSER_PLACEMENT_FULL_CPU if is_cpu_only
+                                else DIFFUSER_PLACEMENT_FULL_GPU),
         "imagegen_threads": dt,
         "imagegen_width": 512,
         "imagegen_height": 512,
