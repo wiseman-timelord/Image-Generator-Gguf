@@ -111,10 +111,8 @@ Note: As shown in the images on the readme.md, I was not able to load Z-Image-Tu
 
 ### Development:
 A small program in python with gradio 5...
-- Fixing inference.
 - Last model location selected by browse, needs to be saved in a key in the json, and used when brose is selected, and the installer needs to create a json with that key with default value of ".\models". configure script json functions needs to loadingFromJsonToGlobals/SavingFromGlobalsToJson.
 - Implementing PyQt (???), for built-in browser, for fake application style interface.
-- Test inference.
 - Add edit image feature.
 
 ### Structure:
