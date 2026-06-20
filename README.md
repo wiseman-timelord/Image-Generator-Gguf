@@ -80,8 +80,8 @@ Development is somewhat stopped for now due to, v1 done (working + nice) and fun
 ### Structure:
 - Current plan for scripts is...
 ```
-Image-Generator-Gguf/
-├── Image-Generator-Gguf.bat      # Windows launcher batch file
+Image-Gradio-Gguf/
+├── Image-Gradio-Gguf.bat      # Windows launcher batch file
 ├── launcher.py                    # Startup, Shutdown, Main Loop.
 ├── installer.py                   # Download, Setup & Build, Install, creation/rectiation of json, creation/recreation of constants.ini.
 ├── data/
