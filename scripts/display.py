@@ -286,16 +286,24 @@ def _build_generate_tab_inner() -> None:
                 _gen["seed_num"] = gr.Number(label="Seed (-1 = random)",
                                              value=cfg.get("imagegen_seed", -1), precision=0)
 
-
-            _gen["save_btn"]    = gr.Button("Save as Default", size="sm")
-
+            # NOTE: no manual "Save as Default" button — successful
+            # generations auto-save their settings panel values (see
+            # on_generate_click / do_generate's success branch), so the
+            # next launch picks up the last settings that actually worked.
 
         # ── Right column: image preview only ────────────────────────────────
         with gr.Column(scale=2):
             gr.Markdown("### Output")
             with gr.Row(visible=configured) as _gen["generate_row"]:
+                # Single dynamic button: shows "Generate" (primary) when idle
+                # and switches to "Stop" (red/stop variant) while a
+                # generation is running. Avoids showing an irrelevant
+                # Generate button mid-run or an irrelevant Stop button when
+                # idle. do_generate() flips it to Stop on entry and back to
+                # Generate on its final yield; the .click() handler below
+                # branches on the button's current label to decide whether
+                # this click should start or cancel a generation.
                 _gen["generate_btn"] = gr.Button("Generate", variant="primary", size="lg")
-                _gen["stop_btn"]     = gr.Button("Stop", variant="stop")
 
             # Single currently-selected/in-progress image — the ONLY image
             # shown here is either the most recent generation, the live
@@ -380,26 +388,32 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
     def do_generate(prompt, negative, width, height, steps, sampler,
                     cfg_scale, seed, batch, output_format):
         """
-        Generator: yields (preview_img, gallery, status) tuples so the
-        preview box can switch between program_encoding.jpg /
+        Generator: yields (preview_img, gallery, status, btn_update) tuples
+        so the preview box can switch between program_encoding.jpg /
         program_diffusion.jpg while generation runs, WITHOUT using Gradio's
         built-in progress bar anywhere (gallery, preview, or otherwise).
+        btn_update flips the single Generate/Stop button to its "Stop"
+        appearance for the duration of the run and back to "Generate" on
+        the final yield (including early-exit validation failures, which
+        never started a run and so should leave the button as Generate).
         Final yield swaps the preview to the finished image and rescans
         .\\output into the gallery — the gallery never receives a per-call
         image list, only full folder rescans.
         """
         gallery_now  = _get_recent_images()
         preview_now  = _idle_preview_image()
+        _btn_generate = gr.update(value="Generate", variant="primary")
+        _btn_stop     = gr.update(value="Stop", variant="stop")
 
         if not prompt or not prompt.strip():
-            yield preview_now, gallery_now, "Please enter a prompt."
+            yield preview_now, gallery_now, "Please enter a prompt.", _btn_generate
             return
         c = _cfg()
         if not c.get("imagegen_model_path") or not Path(c["imagegen_model_path"]).exists():
-            yield preview_now, gallery_now, "Image generation model not configured. Go to Configuration tab."
+            yield preview_now, gallery_now, "Image generation model not configured. Go to Configuration tab.", _btn_generate
             return
         if not c.get("vae_model_path") or not Path(c["vae_model_path"]).exists():
-            yield preview_now, gallery_now, "VAE model not configured. Go to Configuration tab."
+            yield preview_now, gallery_now, "VAE model not configured. Go to Configuration tab.", _btn_generate
             return
 
         # Cancel any pending unload while we are generating
@@ -489,14 +503,25 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
         t.start()
 
         last_shown_img = None
+        first_tick = True
+        # Button switches to "Stop" the moment the worker thread starts.
+        # Only send that update on the FIRST poll tick — re-sending the same
+        # gr.update() on every 0.15s tick forces Gradio to re-render the
+        # button node repeatedly, which was cascading into a layout
+        # recalculation of sibling nodes in the same column (incl. the
+        # preview image) and intermittently knocking out its object-fit
+        # CSS override. Once the button is already showing "Stop", later
+        # ticks pass a true no-op (gr.update()) for it.
         while not _phase["done"]:
             img = _status_image(_phase["name"])
             status_text = _format_status()
+            btn_update = _btn_stop if first_tick else gr.update()
+            first_tick = False
             if img and img != last_shown_img:
                 last_shown_img = img
-                yield img, gr.update(), status_text
+                yield img, gr.update(), status_text, btn_update
             else:
-                yield gr.update(), gr.update(), status_text
+                yield gr.update(), gr.update(), status_text, btn_update
             time.sleep(0.15)
         t.join()
 
@@ -515,19 +540,48 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
             msg = (f"{result['message']} | Seed: {result['seed_used']} "
                    f"| Time: {result['elapsed_seconds']}s")
             new_gallery = _get_recent_images()
-            yield str(out_path), new_gallery, msg
+            yield str(out_path), new_gallery, msg, _btn_generate
+            # Auto-save the settings that just successfully produced an
+            # image (fix #3 — replaces the old manual "Save as Default"
+            # button). Only on success, so a failed/cancelled run never
+            # overwrites the last known-good settings.
+            configure.update_persistent({
+                "imagegen_width": int(width), "imagegen_height": int(height),
+                "imagegen_steps": int(steps), "imagegen_sampling": sampler,
+                "imagegen_cfg_scale": float(cfg_scale),
+                "imagegen_seed": int(seed), "imagegen_batch_count": int(batch),
+                "negative_prompt": negative,
+                "output_format": output_format,
+            })
         else:
             new_gallery = _get_recent_images()
-            yield _idle_preview_image(), new_gallery, result.get("message", "Unknown error")
+            yield _idle_preview_image(), new_gallery, result.get("message", "Unknown error"), _btn_generate
 
+
+    def on_generate_click(prompt, negative, width, height, steps, sampler,
+                          cfg_scale, seed, batch, output_format,
+                          current_label):
+        """Dispatch a click on the single dynamic button. While idle the
+        button reads "Generate" and a click starts a run (delegating to the
+        do_generate generator, which yields its own button-state updates).
+        While a run is in progress the button reads "Stop" and a click only
+        requests cancellation — it must NOT start a second concurrent run."""
+        if current_label == "Stop":
+            configure.APP_STATE["cancel_requested"] = True
+            yield gr.update(), gr.update(), "Cancel requested...", gr.update(value="Stop", variant="stop")
+            return
+        yield from do_generate(prompt, negative, width, height, steps, sampler,
+                               cfg_scale, seed, batch, output_format)
 
     _gen["generate_btn"].click(
-        do_generate,
+        on_generate_click,
         inputs=[_gen["prompt_tb"], _gen["negative_tb"],
                 _gen["width_dd"], _gen["height_dd"], _gen["steps_dd"],
                 _gen["sampler_dd"], _gen["cfg_scale_sld"],
-                _gen["seed_num"], _gen["batch_dd"], _gen["output_fmt_dd"]],
-        outputs=[_gen["preview_img"], _gen["output_gallery"], status_box],
+                _gen["seed_num"], _gen["batch_dd"], _gen["output_fmt_dd"],
+                _gen["generate_btn"]],
+        outputs=[_gen["preview_img"], _gen["output_gallery"], status_box,
+                 _gen["generate_btn"]],
     )
 
     def on_gallery_select(evt: gr.SelectData):
@@ -544,32 +598,6 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
         on_gallery_select,
         inputs=None,
         outputs=_gen["preview_img"],
-    )
-
-    _gen["stop_btn"].click(
-        lambda: (configure.APP_STATE.__setitem__("cancel_requested", True),
-                 "Cancel requested...")[1],
-        outputs=status_box,
-    )
-
-    def save_defaults(width, height, steps, sampler, cfg_scale, seed, batch, neg, output_format):
-        configure.update_persistent({
-            "imagegen_width": int(width), "imagegen_height": int(height),
-            "imagegen_steps": int(steps), "imagegen_sampling": sampler,
-            "imagegen_cfg_scale": float(cfg_scale),
-            "imagegen_seed": int(seed), "imagegen_batch_count": int(batch),
-            "negative_prompt": neg,
-            "output_format": output_format,
-        })
-        return "Defaults saved!"
-
-    _gen["save_btn"].click(
-        save_defaults,
-        inputs=[_gen["width_dd"], _gen["height_dd"], _gen["steps_dd"],
-                _gen["sampler_dd"], _gen["cfg_scale_sld"],
-                _gen["seed_num"], _gen["batch_dd"], _gen["negative_tb"],
-                _gen["output_fmt_dd"]],
-        outputs=status_box,
     )
 
     # ── Refresh generate_row visibility when prompt changes ──
@@ -996,11 +1024,19 @@ font-size: 1rem !important;
 #exit-btn:hover { background: #c0392b !important; }
 
 /* ── Preview box: the box height (550px) is already fixed by the height=550
-kwarg. Gradio's own .image-frame/.image-container rules already use
-object-fit: scale-down by default — but those rules carry a Svelte scope
-hash that can out-rank generic selectors depending on load order. Target
-the structural classes directly, with #id + class stacking, so this wins
-the cascade regardless of load order. ─────────────────────────────────── */
+kwarg. gr.Image in Gradio 6.19.0 has NO object_fit kwarg (only gr.Gallery
+does), so fit-to-box behavior must be driven entirely by CSS here. Gradio's
+own native rule is `.image-frame img { width:100%; height:100%;
+object-fit:scale-down }` — scale-down only ever shrinks an oversized image,
+it never enlarges one smaller than the box (e.g. a 256x256 generation
+inside this 550px box), which is why small images rendered tiny. We
+replicate the same width/height:100% sizing (required for object-fit to
+have any box to fit against) but swap in object-fit:contain so it scales
+BOTH directions — shrinking large images and enlarging small ones, always
+preserving aspect ratio. The Svelte scope hash on Gradio's own rule can
+out-rank generic selectors depending on load order, so target the
+structural classes directly with #id + class stacking to win the cascade
+regardless of load order. ─────────────────────────────────────────────── */
 #preview-img.gradio-container,
 #preview-img,
 #preview-img .image-container,
@@ -1013,10 +1049,8 @@ max-height: 550px !important;
 #preview-img img,
 #preview-img .image-frame img,
 #preview-img .image-frame.svelte-12vrxzd img {
-width: auto !important;
-height: auto !important;
-max-width: 100% !important;
-max-height: 100% !important;
+width: 100% !important;
+height: 100% !important;
 object-fit: contain !important;
 }
 

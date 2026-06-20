@@ -60,8 +60,20 @@ SAMPLER_MAP: Dict[str, str] = {
     "dpm2": "dpm2", "dpm++2s_a": "dpm++2s_a", "dpm++2m": "dpm++2m",
     "dpm++2mv2": "dpm++2mv2", "lcm": "lcm", "ddim": "ddim", "plms": "plms",
 }
-IMAGE_SIZES       = [256, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 1024]
-STEP_CHOICES      = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50]
+# sd.cpp silently rounds width/height up to the nearest multiple of 64
+# internally (latent-space alignment requirement of the VAE/DiT). Any value
+# here that is not itself a multiple of 64 will be "corrected" by sd.cpp
+# without telling the UI, so the dropdown would show one value while the
+# actual output used another. Restricting the choices to confirmed-safe,
+# already-64-aligned values eliminates that mismatch entirely.
+IMAGE_SIZES       = [256, 512, 768, 1024]
+
+# Z-Image-Turbo is a distilled few-step model; step counts are conventionally
+# chosen as doubling powers of two (1/2/4/8/16/...) to match the distillation
+# schedule the turbo checkpoint was trained against. Restricting the choices
+# here keeps the UI from offering values that don't correspond to a step the
+# turbo schedule was actually trained on.
+STEP_CHOICES      = [1, 2, 4, 8, 16]
 BATCH_SIZE_CHOICES = [128, 256, 512, 1024, 2048]
 
 # Context size maxes out at the model's trained context length (40960)
@@ -543,7 +555,7 @@ def get_generation_presets() -> Dict[str, Dict[str, Any]]:
             "imagegen_width": 512, "imagegen_height": 512,
         },
         "Quality": {
-            "imagegen_steps": 20, "imagegen_cfg_scale": 7.0,
+            "imagegen_steps": 16, "imagegen_cfg_scale": 7.0,
             "imagegen_sampling": "dpm++2m",
             "imagegen_width": 768, "imagegen_height": 768,
         },
@@ -555,6 +567,6 @@ def get_generation_presets() -> Dict[str, Dict[str, Any]]:
         "Widescreen": {
             "imagegen_steps": 8, "imagegen_cfg_scale": 1.5,
             "imagegen_sampling": "euler_a",
-            "imagegen_width": 768, "imagegen_height": 432,
+            "imagegen_width": 1024, "imagegen_height": 512,
         },
     }
