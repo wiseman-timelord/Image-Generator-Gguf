@@ -283,7 +283,7 @@ def _build_generate_tab_inner() -> None:
         label="Generated Images",
         value=_get_recent_images(),
         columns=16, rows=1,
-        height=120,
+        height=123,
         object_fit="contain",
         allow_preview=False,
         show_label=False,
@@ -1003,8 +1003,29 @@ Gradio 6's grid gallery renders each cell as <div class="thumbnail-lg ...">
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-    overflow: hidden !important;
+    overflow-y: hidden !important;
+    overflow-x: auto !important;   /* keep horizontal scroll if needed */
     background: var(--background-fill-secondary) !important;
+}
+
+/* ── Gallery: kill the dead vertical scrollbar on the right ──────────────
+The scrollbar the user sees is NOT on the individual .gallery-item cells
+(those were already overflow-y:hidden above) — it's on .grid-wrap itself,
+which is the actual scrolling viewport Gradio sizes to the `height=` prop
+passed to gr.Gallery(). With rows=1 the row content fits inside that
+height, so the vertical scrollbar that still appears is just an empty,
+non-functional track. We disable vertical scroll on the viewport directly
+and hide its scrollbar cross-browser, while still allowing horizontal
+scroll/wrap behavior to pass through to the row of thumbnails. ── */
+#output-gallery .grid-wrap {
+    overflow-y: hidden !important;
+    scrollbar-width: none !important;      /* Firefox */
+    -ms-overflow-style: none !important;   /* old Edge/IE */
+}
+#output-gallery .grid-wrap::-webkit-scrollbar {
+    display: none !important;              /* Chrome/Edge/Safari */
+    width: 0 !important;
+    height: 0 !important;
 }
 """
 
