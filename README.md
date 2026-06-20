@@ -3,7 +3,7 @@
 Status: Beta (working but further development possible)
 
 ### Description
-A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. The program WiseMan-TimeLord probably should have done before doing other image based llm applications WiseMan-TimeLord have produced, this will be a simple image generation project, but eventually cover several encoders and image generation models.
+A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. This is a simple image generation project, covering what is possible currently to be most compitent through GGUF models, through but eventually cover several encoders and image generation models. While this program work great for what it does, it is also example scripts for AI on how to do image inference with such libraries/models, and useful in the production of other progreams that require such things. As you can see it generates OK images, they can look pretty real, but has the typical issues one would exoect under such restrictions and with AI image generation in general, but for simple images I think it will be effective in generating your result in a few iterations, so long as the request is not too barmy.   
 
 ### Media
 - Generation page, now featuring Thumbnails Gallery (A013)...  
@@ -62,6 +62,9 @@ Currently...
 5. Back on the batch menu, select 1 to run the application, the server will start up, and then the built-in browser will pop-up its own window with the Interface displayed. Ensure to go to Configuration page, to set model paths, and what is going to be loaded where, if there is not enough ram on the relating device, it will say in the output (see notes below). Adter configuring, go back to the Generation page, type in your positive prompt, and then hit generate. After you done your first image and everything is confirmed working, then possibly configure the settings further and produce a new prompt, and keep going til you have your images.
 6. Upon exiting the program correctly through the exit button, the user will be returned to the batch menu, and one would then exit from there, or otherwise one could just click the [x] in the top right of all windows associated.
 ```
+
+### Examples:
+- If you want to test the image generation, and you cant think of what to write you could try my suggested example Positive Prompt `A picture of a Woodchuck juggling small logs of wood`, and compare it to my picture of a Woodchuck juggling small logs of wood.
 
 ### Notation:
 - As shown in the images on the readme.md, I was not able to load Z-Image-Turbo in Q4_KM completely to a 8GB GPU without using the option to put the ae.safetensors on the CPU, but I would not use less than a Q4_KM z-image-turbo. This is in addition in my case the Qwen3 model being on the CPU already, but this is no issue as the Encoding is a small task.
