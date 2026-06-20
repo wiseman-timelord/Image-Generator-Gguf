@@ -64,7 +64,7 @@ Currently...
 ```
 
 ### Examples:
-- If you want to test the image generation, then you could try my suggested example Positive Prompt `A picture of a Woodchuck juggling small logs of wood, standing next to a pile of wood.`, and compare it to my picture of a Woodchuck juggling small logs of wood, standing next to a pile of wood.
+- If you want to test the image generation, then you could try my suggested example Positive Prompt `A picture of a Woodchuck standing next to a pile of wood and juggling small logs of wood.`, and compare it to my picture of a Woodchuck standing next to a pile of wood and juggling small logs of wood.
 
 ### Notation:
 - As shown in the images on the readme.md, I was not able to load Z-Image-Turbo in Q4_KM completely to a 8GB GPU without using the option to put the ae.safetensors on the CPU, but I would not use less than a Q4_KM z-image-turbo. This is in addition in my case the Qwen3 model being on the CPU already, but this is no issue as the Encoding is a small task.
