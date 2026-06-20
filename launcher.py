@@ -36,11 +36,7 @@ def _print_banner() -> None:
     bs  = utilities.get_build_status()
     cfg = configure.load_persistent()
 
-    print()
-    print("  " + "=" * 60)
-    print("    Image Generator GGUF")
-    print(f"    Python {platform.python_version()}  |  Gradio {gr.__version__}")
-    print("  " + "=" * 60)
+    print(f"  Versioning: Python {platform.python_version()}; Gradio {gr.__version__}")
     print(f"\n  CPU     : {cpu['brand']}")
     print(f"  Threads : {cpu['default_threads']} (85% of {cpu['cores_logical']} logical cores)")
     print(f"  Vulkan  : {vk['available']}  ({vk['version']})")

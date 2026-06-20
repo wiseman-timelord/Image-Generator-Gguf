@@ -3,31 +3,34 @@ REM Image-Gradio-Gguf.bat
 REM Batch menu for Image Generator GGUF.
 REM No parentheses in logic per project constraint.
 
-mode con cols=84 lines=30
-powershell -noprofile -command "& { $w = $Host.UI.RawUI; $b = $w.BufferSize; $b.Height = 6000; $w.BufferSize = $b; }"
-
 REM ==== Ensure System32 is on PATH - ping, timeout, where, netsh ====
 REM Prepend System32 without discarding the existing PATH so installed
 REM tools, the venv Scripts folder and Python itself remain reachable.
 set "PATH=%SystemRoot%\System32;%SystemRoot%\System32\Wbem;%PATH%"
 
-REM ==== DP0 TO SCRIPT BLOCK ====
+REM ==== Static Configuration ====
+set "TITLE=Image-Gradio-Gguf"
+title %TITLE%
+mode con cols=84 lines=30
+powershell -noprofile -command "& { $w = $Host.UI.RawUI; $b = $w.BufferSize; $b.Height = 6000; $w.BufferSize = $b; }"
+
+:: DP0 TO SCRIPT BLOCK
 set "ScriptDirectory=%~dp0"
 set "ScriptDirectory=%ScriptDirectory:~0,-1%"
 cd /d "%ScriptDirectory%"
-echo Dp0ing to: %ScriptDirectory%
+echo Dp0'd to Script.
 
 REM ==== Admin Check ====
 net session >nul 2>&1
 if %errorLevel% NEQ 0 (
     echo Error: Admin Required!
-    timeout /t 3 /nobreak >nul
+    timeout /t 2 >nul
     echo Right Click, Run As Administrator.
-    timeout /t 3 /nobreak >nul
-    goto :end_of_script_console
+    timeout /t 2 >nul
+    goto :end_of_script
 )
 echo Status: Administrator
-timeout /t 2 /nobreak >nul
+timeout /t 1 >nul
 
 REM Ensure base directories exist
 if not exist "data"    mkdir data
@@ -117,11 +120,12 @@ REM Using the venv python directly avoids activate.bat PATH issues while
 REM still ensuring all venv packages are available.
 if not exist "%VENVPY%" goto :no_venv
 
-echo.
-echo   Starting application at http://127.0.0.1:7860
+cls
+echo ================================================================================
+echo       Image-Gradio-Gguf: Starting Program...
+echo ================================================================================
 echo.
 "%VENVPY%" launcher.py
-
 echo.
 echo   Application exited. Press any key to return to menu.
 pause >nul
