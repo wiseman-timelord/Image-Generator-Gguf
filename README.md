@@ -93,8 +93,29 @@ A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder
 
 ### Models...
 I put Q# because it should support any quantization, the model variety will be expanded upon later....
-- intended Encoding model, "Qwen3-4b-Z-Image-Turbo-AbliteratedV1.Q#.gguf" and "Qwen3-4b-Uncensored-Z-Image-Engineer-V4-Q#.gguf
+- intended Encoding model, "Qwen3-4b-Z-Image-Turbo-AbliteratedV1.Q#.gguf" and "Qwen3-4b-Uncensored-Z-Image-Engineer-V4-Q#.gguf. 
 - intended Image generation model "z_image_turbo-Q#.gguf" and "ae.safetensors". (again this should cover all quantizations)
+
+### Instructions:
+Currently the instructions are as follows...
+```
+1. Ensure you have downloaded the correct models from Huggingface, put them on your model storage drive (if you have one). You can put them in .\models if you like, but then this will cause a bloated folder, and you may not remember later. 
+2. Ensure to download the latest release version to a suitable location, then unpack to the place you intend to have the program.
+3. Run the program via right click run as admin on `Image-Gradio-Gguf.bat`, this will launch the batch menu.
+4. Ensure that everything has access to the internet that may request it during install, and the libraries/packages will install appropriately to the program folder, not globally. After which there will be a summary, and you will be returned to the batch menu. hopefully everything went ok for you. If there are any issues at this stage, I would suggest the installer should indicate what the issue was, so maybe paste that into AI with the installer script to fix your system compatibility.
+5. Back on the batch menu, select 1 to run the application, the server will start up, and then your default browser will pop-up a window with the Interface displayed.
+6. Upon exiting the program correctly through the exit button, the user will be returned to the batch menu, and one would then exit from there, or otherwise one could just click the [x] in the top right of all windows associated.
+
+Note: As shown in the images on the readme.md, I was not able to load Z-Image-Turbo in Q4_KM completely to a 8GB GPU without using the option to put the ae.safetensors on the CPU, but I would not use less than a Q4_KM z-image-turbo. This is in addition in my case the Qwen3 model being on the CPU already, but this is no issue as the Encoding is a small task.
+```
+
+### Development:
+A small program in python with gradio 5...
+- Fixing inference.
+- Last model location selected by browse, needs to be saved in a key in the json, and used when brose is selected, and the installer needs to create a json with that key with default value of ".\models". configure script json functions needs to loadingFromJsonToGlobals/SavingFromGlobalsToJson.
+- Implementing PyQt (???), for built-in browser, for fake application style interface.
+- Test inference.
+- Add edit image feature.
 
 ### Structure:
 - Current plan for sripts is...
@@ -115,14 +136,6 @@ Image-Generator-Gguf/
 ├── models/                        # Default model directory
 └── output/                        # Generated images directory
 ```
-
-### Development:
-A small program in python with gradio 5...
-- Fixing inference.
-- Last model location selected by browse, needs to be saved in a key in the json, and used when brose is selected, and the installer needs to create a json with that key with default value of ".\models". configure script json functions needs to loadingFromJsonToGlobals/SavingFromGlobalsToJson.
-- Implementing PyQt (???), for built-in browser, for fake application style interface.
-- Test inference.
-- Add edit image feature.
 
 ### Design
 - Page 1 the Interaction page- it will have a text box with a generate button underneath, to the side of that will be configurations for image generation, with dropdown list for reasonable values and sensible default settings and sensible ranges in the lists.
