@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -315,7 +316,6 @@ def _is_oom_output(text: str) -> bool:
             if marker.replace(" ", "") in lower:
                 return True
         else:
-            import re
             if re.search(marker, text, re.IGNORECASE):
                 return True
     return False
@@ -404,8 +404,10 @@ def enhance_prompt(prompt: str, cfg: Dict[str, Any],
     _retry_reductions: Tuple[int, ...] = (0, 1, 2, 4)
     max_attempts = len(_retry_reductions)  # 4
 
+    phase_t0 = time.time()
     if progress_callback:
-        progress_callback("Enhancing prompt with LLM...", 0.1)
+        progress_callback("Enhancing prompt with LLM...", 0.1,
+                          {"phase": "encoding", "phase_start": phase_t0})
 
     for attempt in range(max_attempts):
         # Cumulative layer reduction across retries: 0, -1, -3, -7
@@ -422,7 +424,8 @@ def enhance_prompt(prompt: str, cfg: Dict[str, Any],
             )
             if progress_callback:
                 progress_callback(
-                    f"Enhancing prompt (OOM retry {attempt}, ngl={ngl})...", 0.1)
+                    f"Enhancing prompt (OOM retry {attempt}, ngl={ngl})...", 0.1,
+                    {"phase": "encoding", "phase_start": phase_t0})
 
         try:
             result = subprocess.run(
@@ -460,8 +463,13 @@ def enhance_prompt(prompt: str, cfg: Dict[str, Any],
                     output = output.replace(marker, "")
                 output = output.strip()
             if output and len(output) > 10:
+                encoder_elapsed = time.time() - phase_t0
+                configure.update_timing_stat("encoder_seconds", round(encoder_elapsed, 3))
                 if progress_callback:
-                    progress_callback("Prompt enhanced.", 0.2)
+                    progress_callback(
+                        "Prompt enhanced.", 0.2,
+                        {"phase": "encoding", "phase_done": True,
+                         "phase_elapsed": encoder_elapsed})
                 return output[:2000]
 
             # Non-OOM failure or empty output — no point retrying
@@ -473,6 +481,30 @@ def enhance_prompt(prompt: str, cfg: Dict[str, Any],
             break
 
     return prompt
+
+
+# ---------------------------------------------------------------------------
+# sd.cpp step-progress parsing
+# ---------------------------------------------------------------------------
+# stable-diffusion.cpp prints per-step progress lines while sampling, in
+# forms such as:
+#   "  |==========>      | 2/4 - 1.23s/it"
+#   "[sample] 3/4"
+#   "sampling, step 4/4"
+# This regex tolerates all of the above: it just looks for "N/M" where M
+# matches --steps. It deliberately does NOT try to parse the progress-bar
+# glyphs or the "s/it" suffix — those vary across builds and aren't needed.
+_STEP_LINE_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+
+def _parse_step_line(line: str, total_steps: int) -> Optional[Tuple[int, int]]:
+    """Return (current_step, total_steps) if line looks like step progress
+    for THIS run (denominator matches total_steps), else None."""
+    for m in _STEP_LINE_RE.finditer(line):
+        cur, tot = int(m.group(1)), int(m.group(2))
+        if tot == total_steps and 0 <= cur <= tot:
+            return cur, tot
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -622,8 +654,12 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
     if clip_skip > 1 and is_sd_classic:
         args.extend(["--clip-skip", str(clip_skip)])
 
+    total_steps = int(cfg.get("imagegen_steps", 4))
+    diffusion_t0 = time.time()
     if progress_callback:
-        progress_callback("Generating image...", 0.3)
+        progress_callback("Generating image...", 0.3,
+                          {"phase": "diffusion", "phase_start": diffusion_t0,
+                           "step": 0, "total_steps": total_steps})
 
     try:
         process = subprocess.Popen(
@@ -631,11 +667,18 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
             text=True, encoding="utf-8", errors="replace", env=env,
         )
         output_lines: List[str] = []
+        last_step = 0
         for line in process.stdout:
             output_lines.append(line)
-            if progress_callback and ("step" in line.lower() or "%" in line):
+            if progress_callback and ("step" in line.lower() or "%" in line or "/" in line):
+                step_info = _parse_step_line(line, total_steps)
+                info: Dict[str, Any] = {"phase": "diffusion", "phase_start": diffusion_t0}
+                if step_info:
+                    last_step = step_info[0]
+                    info["step"] = step_info[0]
+                    info["total_steps"] = step_info[1]
                 try:
-                    progress_callback(line.strip()[:100], 0.3)
+                    progress_callback(line.strip()[:100], 0.3, info)
                 except Exception:
                     pass
             if configure.APP_STATE.get("cancel_requested"):
@@ -647,8 +690,19 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
 
         process.wait(timeout=600)
         elapsed = time.time() - t0
+        diffusion_elapsed = time.time() - diffusion_t0
 
         if process.returncode == 0 and output_path.exists():
+            # Record diffusion timing for next-generation ETA, using
+            # whichever step count we actually observed (falls back to the
+            # configured total if no step lines matched the parser).
+            steps_for_avg = last_step if last_step > 0 else total_steps
+            configure.update_timing_stat("diffusion_total_seconds", round(diffusion_elapsed, 3))
+            configure.update_timing_stat("diffusion_steps", steps_for_avg)
+            if steps_for_avg > 0:
+                configure.update_timing_stat(
+                    "diffusion_per_step_seconds",
+                    round(diffusion_elapsed / steps_for_avg, 3))
             result.update(
                 success=True, output_path=str(output_path),
                 message=f"Saved {output_name} ({elapsed:.1f}s)",
@@ -656,7 +710,8 @@ def generate_image(prompt: str, cfg: Dict[str, Any],
                 elapsed_seconds=round(elapsed, 2),
             )
             if progress_callback:
-                progress_callback(f"Done: {output_name}", 1.0)
+                progress_callback(f"Done: {output_name}", 1.0,
+                                  {"phase": "done", "phase_elapsed": diffusion_elapsed})
         else:
             # Full subprocess output -> terminal (Windows console) only.
             full_output = "".join(output_lines)

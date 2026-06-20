@@ -98,6 +98,33 @@ APP_STATE: Dict[str, Any] = {
     "cancel_requested": False,
 }
 
+# ---------------------------------------------------------------------------
+# Generation phase timing  (transient — not persisted to disk)
+# ---------------------------------------------------------------------------
+# Learned from the previous generation(s) *within this session* so the status
+# bar can show an accurate ETA-style timer instead of a flat "Generating...".
+# Updated by inference.py as each phase completes:
+#   encoder_seconds            - how long the last prompt-encoding pass took
+#   diffusion_total_seconds    - how long the last full diffusion pass took
+#   diffusion_steps            - how many steps that diffusion pass used
+#   diffusion_per_step_seconds - diffusion_total_seconds / diffusion_steps
+# All start at 0.0 / 0 until the first generation in the session completes
+# the relevant phase at least once. display.py falls back to a plain
+# "Encoding..." / "Diffusing..." message (no ETA) until a value is available.
+TIMING_STATS: Dict[str, float] = {
+    "encoder_seconds": 0.0,
+    "diffusion_total_seconds": 0.0,
+    "diffusion_steps": 0,
+    "diffusion_per_step_seconds": 0.0,
+}
+
+
+def update_timing_stat(key: str, value: float) -> None:
+    """Single-key update for TIMING_STATS. Dict item assignment is atomic
+    under the GIL, so no lock is needed for this simple case."""
+    if key in TIMING_STATS:
+        TIMING_STATS[key] = value
+
 
 # ---------------------------------------------------------------------------
 # Project paths
@@ -133,6 +160,16 @@ def get_models_dir() -> Path:
     return _get_project_root() / "models"
 
 
+def get_media_dir() -> Path:
+    """
+    Static UI status images (not user data, not generated output):
+      media/program_no_media.jpg  - shown when output/ is empty / idle
+      media/program_encoding.jpg  - shown while the prompt-encoder LLM runs
+      media/program_diffusion.jpg - shown while sd.cpp diffusion runs
+    """
+    return _get_project_root() / "media"
+
+
 def get_build_dir() -> Path:
     return _get_project_root() / "data" / "build"
 
@@ -147,7 +184,7 @@ def get_sd_bin_dir() -> Path:
 
 def ensure_data_dirs() -> None:
     root = _get_project_root()
-    for d in ("data", "output", "models"):
+    for d in ("data", "output", "models", "media"):
         (root / d).mkdir(parents=True, exist_ok=True)
 
 
