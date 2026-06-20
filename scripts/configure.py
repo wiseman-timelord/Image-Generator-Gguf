@@ -369,9 +369,10 @@ def _default_persistent() -> Dict[str, Any]:
     cpu_label = get_cpu_info().get("brand", "CPU") or "CPU"
     is_cpu_only = get_install_type() == "cpu_only"
     return {
-        "encoder_model_path": "", "encoder_model_name": "",
-        "imagegen_model_path": "", "imagegen_model_name": "",
-        "vae_model_path": "", "vae_model_name": "",
+        "encoder_model_path":  "",  "encoder_model_name":  "",
+        "imagegen_model_path": "",  "imagegen_model_name": "",
+        "vae_model_path":      "",  "vae_model_name":      "",
+        "last_model_browse_dir": ".\\models",  # <--- NEW KEY ADDED
         "backend_encoder": cpu_label,
         "backend_imagegen": cpu_label,
         "encoder_threads": dt,
@@ -380,11 +381,11 @@ def _default_persistent() -> Dict[str, Any]:
         "encoder_flash_attn": True,
         "encoder_gpu_layers": -1,
         # imagegen_placement controls component-level GPU/CPU split for the
-        # diffuser (see DIFFUSER_PLACEMENT_* / parse_diffuser_placement()).
+        # diffuser (see DIFFUSER_PLACEMENT * / parse_diffuser_placement()).
         # sd.cpp has no per-layer offload, so this — not a layer count — is
         # the real equivalent of encoder_gpu_layers for the diffuser side.
         "imagegen_placement": (DIFFUSER_PLACEMENT_FULL_CPU if is_cpu_only
-                                else DIFFUSER_PLACEMENT_FULL_GPU),
+                               else DIFFUSER_PLACEMENT_FULL_GPU),
         "imagegen_threads": dt,
         "imagegen_width": 512,
         "imagegen_height": 512,

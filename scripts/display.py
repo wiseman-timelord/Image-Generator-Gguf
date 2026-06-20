@@ -39,8 +39,22 @@ def _browse_file() -> str:
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
+        
+        # Determine the initial directory for the file dialog
+        cfg = configure.load_persistent()
+        last_dir = cfg.get("last_model_browse_dir", "")
+        initial_dir = str(configure.get_models_dir())
+        
+        if last_dir:
+            # Resolve the path (handles relative paths like ".\models")
+            p = Path(last_dir)
+            if not p.is_absolute():
+                p = configure._get_project_root() / p
+            if p.exists() and p.is_dir():
+                initial_dir = str(p)
+                
         path = filedialog.askopenfilename(
-            initialdir=str(configure.get_models_dir()),
+            initialdir=initial_dir,
             filetypes=[
                 ("Model files", "*.gguf *.safetensors"),
                 ("GGUF",        "*.gguf"),
@@ -49,7 +63,14 @@ def _browse_file() -> str:
             ],
         )
         root.destroy()
-        return path or ""
+        
+        # If a file was selected, save its directory for next time
+        if path:
+            selected_dir = str(Path(path).parent)
+            configure.update_persistent({"last_model_browse_dir": selected_dir})
+            return path
+            
+        return ""
     except Exception:
         return ""
 

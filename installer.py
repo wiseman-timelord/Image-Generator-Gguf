@@ -370,6 +370,7 @@ def write_default_persistent(cpu: Dict[str, Any]) -> None:
         "encoder_model_path": "", "encoder_model_name": "",
         "imagegen_model_path": "", "imagegen_model_name": "",
         "vae_model_path": "", "vae_model_name": "",
+        "last_model_browse_dir": ".\\models",  # <--- NEW KEY ADDED
         "backend_encoder": "CPU",
         "backend_imagegen": "CPU",
         "encoder_threads": dt,
