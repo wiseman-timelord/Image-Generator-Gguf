@@ -1,6 +1,8 @@
 ![image missing](https://raw.githubusercontent.com/wiseman-timelord/Image-Generator-Gguf/refs/heads/main/media/banner_llama.jpg)
 # Image-Gradio-Gguf
 Status: Beta (working but further development possible)
+- v1.07 has installer that will likely work, and the program is working well enough.
+- v1.08+ will have advanced processor support, mainly, improvements and proper compiling, for Intel chips. I cannot confirm updates after this will install correctly, due to funding issues, if you have issues installing and like the project, then please support via sponsor or donate on kofi/patreon.  
 
 ### Description
 A local python image generator from prompt using Qwen 3 Z-Image Engineer encoder and Z-Image Turbo. This is a simple image generation project, covering what is possible currently to be most compitent through GGUF models, through but eventually cover several encoders and image generation models. While this program work great for what it does, it is also example scripts for AI on how to do image inference with such libraries/models, and useful in the production of other progreams that require such things. As you can see it generates OK images, they can look pretty real, but has the typical issues one would exoect under such restrictions and with AI image generation in general, but for simple images I think it will be effective in generating your result in a few iterations, so long as the request is not too barmy.   
