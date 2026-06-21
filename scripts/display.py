@@ -642,12 +642,11 @@ def _build_config_tab_inner() -> None:
 
     # ── Model paths (encoder + diffusion on one row) ──
     gr.Markdown("### Model Paths")
-    # Path textboxes are hidden — used internally by browse callbacks and save
     _cfg_w["enc_path_tb"]  = gr.Textbox(value=cfg.get("encoder_model_path", ""),  visible=False)
     _cfg_w["diff_path_tb"] = gr.Textbox(value=cfg.get("imagegen_model_path", ""), visible=False)
 
     with gr.Row():
-        with gr.Column(scale=4):
+        with gr.Column(scale=1):
             with gr.Row():
                 _cfg_w["enc_name_tb"] = gr.Textbox(
                     label="Encoder Name",
@@ -658,7 +657,7 @@ def _build_config_tab_inner() -> None:
                 )
                 _cfg_w["enc_browse_btn"] = gr.Button("Browse...", size="sm", scale=1, min_width=90)
 
-        with gr.Column(scale=4):
+        with gr.Column(scale=1):
             with gr.Row():
                 _cfg_w["diff_name_tb"] = gr.Textbox(
                     label="Diffusion Name",
@@ -681,11 +680,11 @@ def _build_config_tab_inner() -> None:
     gr.Markdown("### Backend Selection")
     if is_cpu_only:
         gr.Markdown(
-            "GPU options are not available (Cpu-only install). "
+            "(Cpu-only install). "
         )
     else:
         gr.Markdown(
-            "GPU options are available (Vulkan install). "
+            "(Vulkan install). "
         )
     with gr.Row():
         with gr.Column(scale=2):
@@ -784,7 +783,7 @@ def _build_config_tab_inner() -> None:
     # ── Save ──
     with gr.Row():
         _cfg_w["save_all_btn"]    = gr.Button("Save All Configuration", variant="primary", size="lg")
-        _cfg_w["unload_btn"]      = gr.Button("Unload Models", variant="secondary", size="lg")
+
 
     # ── Events: browse & scan — no status output, wire immediately ──
     def _browse_encoder():
@@ -914,12 +913,6 @@ def _wire_config_events(status_box: gr.Textbox) -> None:
         ],
         outputs=status_box,
     )
-
-    w["unload_btn"].click(
-        lambda: (inference.unload_models(), "Models unloaded.")[1],
-        outputs=status_box,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Tab 3 — Debug / Info
