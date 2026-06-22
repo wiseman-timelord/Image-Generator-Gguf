@@ -435,9 +435,12 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
         #    a prior generation this session, the timer becomes an ETA
         #    countdown-style display ("~Ns left"); until then it just counts
         #    up, since there's nothing to estimate against yet. ──
+        _batch_count = int(batch)
         _phase: Dict[str, Any] = {
             "name": "encoding", "result": None, "done": False,
             "phase_start": time.time(), "step": 0, "total_steps": 0,
+            "batch_current": 1, "batch_total": _batch_count,
+            "last_step_seen": 0,
         }
 
         def prog_cb(msg: str, pct: float, info: Dict[str, Any] = None):
@@ -455,16 +458,33 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
             if "phase_start" in info:
                 _phase["phase_start"] = info["phase_start"]
             if "step" in info:
-                _phase["step"] = info["step"]
+                new_step = info["step"]
+                # Detect when the step counter resets (new image in batch):
+                # a step value of 1 arriving after we've already seen a
+                # higher step means sd.cpp has moved on to the next image.
+                if (new_step == 1 and _phase["last_step_seen"] > 1
+                        and _phase["batch_current"] < _phase["batch_total"]):
+                    _phase["batch_current"] += 1
+                _phase["last_step_seen"] = new_step
+                _phase["step"] = new_step
             if "total_steps" in info:
                 _phase["total_steps"] = info["total_steps"]
 
         def _format_status() -> str:
-            """Build the 'Generate Stage N/2; ... Phase {step}/{total}...###s'
-            status string. Seconds are always whole numbers (no split
-            seconds) per the fixed status-bar format — never decimals."""
+            """Build the 'Batch Number X/Y; Generate Stage N/2; ... Phase
+            {step}/{total}...###s (prev_batch_Ns)' status string. Seconds are
+            always whole numbers (no split seconds) per the fixed status-bar
+            format — never decimals."""
             name = _phase["name"]
             elapsed_s = int(time.time() - _phase["phase_start"])
+            batch_cur = _phase["batch_current"]
+            batch_tot = _phase["batch_total"]
+            batch_prefix = f"Batch Number {batch_cur}/{batch_tot}; "
+
+            # Previous batch elapsed suffix — only shown when we have a
+            # recorded time from a completed batch earlier this session.
+            prev_elapsed = configure.APP_STATE.get("last_batch_elapsed_seconds", 0)
+            prev_suffix = f" ({int(prev_elapsed)}s)" if prev_elapsed else ""
 
             if name == "encoding":
                 # enhance_prompt() (inference.py) is a single-shot llama-cli
@@ -476,15 +496,15 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
                 step = _phase.get("step", 0)
                 total = _phase.get("total_steps", 0)
                 step_part = f" {step}/{total}" if total else ""
-                return (f"Generate Stage 1/2; Encoding Phase{step_part}..."
-                        f"{elapsed_s}s")
+                return (f"{batch_prefix}Generate Stage 1/2; Encoding Phase{step_part}..."
+                        f"{elapsed_s}s{prev_suffix}")
 
             # diffusion
             step = _phase.get("step", 0)
             total = _phase.get("total_steps", 0) or int(gen_cfg.get("imagegen_steps", 0))
             step_part = f" {step}/{total}" if total else ""
-            return (f"Generate Stage 2/2; Diffusing Phase{step_part}..."
-                    f"{elapsed_s}s")
+            return (f"{batch_prefix}Generate Stage 2/2; Diffusing Phase{step_part}..."
+                    f"{elapsed_s}s{prev_suffix}")
 
         def worker():
             try:
@@ -548,6 +568,10 @@ def _wire_generate_events(status_box: gr.Textbox) -> None:
                 print(f"[generate] output file: {out_path}  ({sz} bytes)", flush=True)
             except Exception as e:
                 print(f"[generate] output file STAT FAILED: {out_path}  {e}", flush=True)
+            # Record the total batch elapsed time so the next generation can
+            # display it as a reference in the status bar (previous batch time).
+            batch_elapsed = result.get("elapsed_seconds", 0.0)
+            configure.APP_STATE["last_batch_elapsed_seconds"] = int(round(batch_elapsed))
             msg = (f"{result['message']} | Seed: {result['seed_used']} "
                    f"| Time: {int(round(result['elapsed_seconds']))}s")
             new_gallery = _get_recent_images()

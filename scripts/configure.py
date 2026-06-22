@@ -123,6 +123,7 @@ APP_STATE: Dict[str, Any] = {
     "last_image_path": "",
     "last_prompt": "",
     "is_building": False,
+    "last_batch_elapsed_seconds": 0,  # elapsed seconds of the last completed batch job
 }
 
 # ---------------------------------------------------------------------------
@@ -218,6 +219,28 @@ def ensure_data_dirs() -> None:
 # ---------------------------------------------------------------------------
 # Hardware constants — read from constants.ini (written by installer)
 # ---------------------------------------------------------------------------
+#
+# CPU_FEATURES mirrors installer.py's CPU_FEATURES list (the canonical,
+# compile-time-verified source of truth — installer.py is intentionally
+# self-contained and cannot import scripts.*, so this is a deliberate,
+# documented mirror rather than a shared import). Keep the two in sync.
+#
+# Restricted to instruction-set toggles that actually exist as options in
+# ggml's CMakeLists.txt (shared build system for both llama.cpp and
+# stable-diffusion.cpp, which vendors ggml). ggml exposes one combined
+# "GGML_SSE42" option for the whole SSE/SSSE3/SSE4.x family — there is no
+# per-version GGML_SSE / GGML_SSE2 / GGML_SSE3 / GGML_SSSE3 / GGML_SSE4_1
+# option, so those are deliberately not tracked here. See installer.py's
+# CPU_FEATURES docstring for the verified upstream option list.
+CPU_FEATURES: List[Dict[str, str]] = [
+    {"key": "has_sse4_2",   "name": "SSE4.2", "cmake": "GGML_SSE42=ON"},
+    {"key": "has_avx",      "name": "AVX",    "cmake": "GGML_AVX=ON"},
+    {"key": "has_avx2",     "name": "AVX2",   "cmake": "GGML_AVX2=ON"},
+    {"key": "has_f16c",     "name": "F16C",   "cmake": "GGML_F16C=ON"},
+    {"key": "has_fma",      "name": "FMA",    "cmake": "GGML_FMA=ON"},
+    {"key": "has_avx512",   "name": "AVX512", "cmake": "GGML_AVX512=ON"},
+]
+
 
 def _read_constants() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -242,21 +265,18 @@ def get_cpu_info() -> Dict[str, Any]:
     sec = cfg["cpu"] if cfg.has_section("cpu") else {}
     cores = int(sec.get("cores_logical", str(os.cpu_count() or 4)))
     dt    = int(sec.get("default_threads", str(max(1, math.ceil(cores * 0.85)))))
-    return {
+    info: Dict[str, Any] = {
         "brand":          sec.get("brand", "unknown"),
         "vendor":         sec.get("vendor", "unknown"),
         "arch":           sec.get("arch", "x86_64"),
         "cores_logical":  cores,
         "default_threads": dt,
-        "has_avx":        sec.get("has_avx", "False") == "True",
-        "has_avx2":       sec.get("has_avx2", "False") == "True",
-        "has_f16c":       sec.get("has_f16c", "False") == "True",
-        "has_fma":        sec.get("has_fma", "False") == "True",
-        "has_avx512":     sec.get("has_avx512", "False") == "True",
-        "has_sse4_2":     sec.get("has_sse4_2", "False") == "True",
         "has_aocl":       sec.get("has_aocl", "False") == "True",
         "cmake_flags":    sec.get("cmake_flags", "").split(),
     }
+    for feat in CPU_FEATURES:
+        info[feat["key"]] = sec.get(feat["key"], "False") == "True"
+    return info
 
 
 def get_vulkan_info() -> Dict[str, Any]:
