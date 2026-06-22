@@ -240,7 +240,7 @@ def _build_generate_tab_inner() -> None:
         with gr.Column(scale=3):
             gr.Markdown("### Settings")
             _gen["prompt_tb"] = gr.Textbox(
-                label="Prompt",
+                label="Positive Prompt",
                 placeholder=prompt_ph,
                 lines=2, max_lines=10,
                 value=cfg.get("last_prompt", ""),
@@ -253,10 +253,10 @@ def _build_generate_tab_inner() -> None:
             )
             with gr.Row():
                 _gen["preset_dd"] = gr.Dropdown(
-                    label="Preset", choices=list(presets.keys()), value="Fast (Turbo)",
+                    label="Quality Preset", choices=list(presets.keys()), value="Fast (Turbo)",
                 )
                 _gen["sampler_dd"] = gr.Dropdown(
-                    label="Sampler", choices=list(configure.SAMPLER_MAP.keys()),
+                    label="Sampler Type", choices=list(configure.SAMPLER_MAP.keys()),
                     value=cfg.get("imagegen_sampling", "euler_a"),
                 )
 
@@ -265,9 +265,9 @@ def _build_generate_tab_inner() -> None:
                                                choices=configure.BATCH_COUNT_CHOICES,
                                                value=cfg.get("imagegen_batch_count", 1)
                 )
-                _gen["width_dd"]  = gr.Dropdown(label="Width",  choices=configure.IMAGE_SIZES,
+                _gen["width_dd"]  = gr.Dropdown(label="Image Width",  choices=configure.IMAGE_SIZES,
                                                 value=cfg.get("imagegen_width", 512))
-                _gen["height_dd"] = gr.Dropdown(label="Height", choices=configure.IMAGE_SIZES,
+                _gen["height_dd"] = gr.Dropdown(label="Image Height", choices=configure.IMAGE_SIZES,
                                                 value=cfg.get("imagegen_height", 512))
                 _gen["output_fmt_dd"] = gr.Dropdown(
                     label="Output Format", choices=configure.OUTPUT_FORMATS,
@@ -276,14 +276,14 @@ def _build_generate_tab_inner() -> None:
 
             with gr.Row():
                 _gen["steps_dd"] = gr.Dropdown(
-                    label="Steps", choices=configure.STEP_CHOICES,
+                    label="Diffuse Steps", choices=configure.STEP_CHOICES,
                     value=cfg.get("imagegen_steps", 4),
                 )
                 _gen["cfg_scale_sld"] = gr.Slider(
                     label="CFG Scale", minimum=0.5, maximum=20.0, step=0.5,
                     value=cfg.get("imagegen_cfg_scale", 1.0),
                 )
-                _gen["seed_num"] = gr.Number(label="Seed (-1 = random)",
+                _gen["seed_num"] = gr.Number(label="Gen Seed (-1 = random)",
                                              value=cfg.get("imagegen_seed", -1), precision=0)
 
             # NOTE: no manual "Save as Default" button — successful
@@ -314,7 +314,7 @@ def _build_generate_tab_inner() -> None:
                 else {"show_download_button": True, "show_share_button": False}
             )
             _gen["preview_img"] = gr.Image(
-                label="Generated Image",
+                label="Image Preview",
                 type="filepath",
                 value=_idle_preview_image(),
                 height=configure.PREVIEW_IMAGE_HEIGHT,
@@ -330,7 +330,7 @@ def _build_generate_tab_inner() -> None:
     # solely via full rescans (_get_recent_images), never a per-call image
     # list. Clicking a thumbnail here updates the preview box above — it does
     # not show generation progress, and it is not itself the preview.
-    gr.Markdown("### Gallery")
+    gr.Markdown("### Thumbnails Gallery")
     _gen["output_gallery"] = gr.Gallery(
         label="Generated Images",
         value=_get_recent_images(),
